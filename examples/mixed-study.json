@@ -1,0 +1,40 @@
+{
+  "repository": "example",
+  "accession": "EXAMPLE001",
+  "title": "Aging and inflammatory response metabolomics",
+  "description": "Example only; no biological claim is implied.",
+  "analysis_units": [
+    {
+      "source_subrecord_id": "rp-negative-dda",
+      "label": "RP LC-MS negative DDA",
+      "separation": "LC-MS",
+      "chromatography": "Reversed phase",
+      "ion_mode": "Negative",
+      "acquisition_mode": "DDA",
+      "target_omics": "Lipidomics",
+      "untargeted": true,
+      "sample_metadata": [
+        {
+          "sample_id": "young-control-1",
+          "raw_file": "young-control-1.raw",
+          "values": {
+            "Species": "Mus musculus",
+            "Tissue": "liver",
+            "Age group": "young",
+            "Condition": "control"
+          }
+        },
+        {
+          "sample_id": "aged-treated-1",
+          "raw_file": "aged-treated-1.raw",
+          "values": {
+            "Species": "Mus musculus",
+            "Tissue": "liver",
+            "Age group": "aged",
+            "Condition": "inflammation"
+          }
+        }
+      ]
+    }
+  ]
+}

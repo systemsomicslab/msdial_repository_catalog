@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msdial-repository-catalog"
+version = "0.1.0"
+description = "Local, provenance-aware metadata catalog for public metabolomics reanalysis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "LGPL-3.0-or-later" }
+authors = [{ name = "Systems Omics Lab" }]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.28,<3"]
+
+[project.scripts]
+msdial-repository-catalog = "msdial_repository_catalog.cli:main"
+msdial-repository-catalog-mcp = "msdial_repository_catalog.mcp_server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
