@@ -8,6 +8,8 @@ The catalog is independent of MS-DIAL Interactive and the MS-DIAL Console.
 - MS-DIAL Interactive provides human review, raw-data download, parameter setup, and execution.
 - MCP agents search the same local catalog and propose purpose-specific analysis decisions.
 - MS-DIAL remains responsible for mass-spectrometry data processing.
+- The local catalog GUI visualizes the same SQLite data used by CLI and MCP; it
+  does not introduce another metadata store.
 
 This keeps repository API changes out of the C# processing engine and prevents
 the Interactive UI from becoming the only way to use the metadata.

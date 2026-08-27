@@ -64,6 +64,43 @@ msdial-repository-catalog --database catalog-data/catalog.sqlite search `
   --target-omics Lipidomics --biological-context aging
 ```
 
+## Local GUI
+
+Launch the cross-platform catalog browser after installing the package:
+
+```powershell
+python -m msdial_repository_catalog.gui_server `
+  --database catalog-data/catalog.sqlite
+```
+
+The browser opens at `http://127.0.0.1:8770/`. The GUI reads the local SQLite
+catalog only. It does not contact a public repository, download raw data, or use
+an LLM during search. It provides:
+
+- catalog and repository coverage summaries;
+- combined technical and biological-context filters;
+- Analysis Unit results rather than accession-only results;
+- review warnings and repository provenance;
+- sample metadata and raw-file manifest previews.
+
+Use `--no-browser` when starting it from an agent or service, and set a different
+port with `--port`. The default database is
+`~/.msdial/repository-catalog.sqlite`, shared with the MCP server.
+
+When the Python Scripts directory is on `PATH`, the equivalent installed command
+is `msdial-repository-catalog-gui`.
+
+From a source checkout, Windows users can also double-click
+`scripts/start-gui-windows.cmd`. On macOS or Linux:
+
+```bash
+chmod +x scripts/start-gui.sh
+./scripts/start-gui.sh
+```
+
+Both source-checkout launchers use `catalog-data/catalog.sqlite` unless
+`MSDIAL_REPOSITORY_CATALOG` is set.
+
 Create a release-ready compressed SQLite snapshot:
 
 ```powershell

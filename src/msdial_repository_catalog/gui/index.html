@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MS-DIAL Repository Catalog</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">M</div>
+      <div>
+        <p class="eyebrow">SYSTEMS OMICS LAB</p>
+        <h1>MS-DIAL Repository Catalog</h1>
+        <p>Explore public metabolomics metadata before downloading raw data.</p>
+      </div>
+    </div>
+    <div class="database-pill" id="database-pill">Connecting to local catalog...</div>
+  </header>
+
+  <main>
+    <section class="hero-grid" aria-labelledby="overview-title">
+      <div class="overview-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL INDEX</p>
+            <h2 id="overview-title">Catalog overview</h2>
+          </div>
+          <button class="secondary-button" id="refresh-button" type="button">Refresh</button>
+        </div>
+        <div class="stat-grid" id="stat-grid" aria-live="polite"></div>
+      </div>
+      <div class="repository-panel">
+        <p class="eyebrow">SOURCE COVERAGE</p>
+        <h2>Repositories</h2>
+        <div id="repository-bars" class="repository-bars"></div>
+      </div>
+    </section>
+
+    <section class="search-panel" aria-labelledby="search-title">
+      <div class="section-heading search-heading">
+        <div>
+          <p class="eyebrow">ANALYSIS UNIT FINDER</p>
+          <h2 id="search-title">Find technically compatible data</h2>
+          <p class="section-note">One result represents one candidate MS-DIAL run, not necessarily one repository accession.</p>
+        </div>
+        <div class="result-count" id="result-count">0 results</div>
+      </div>
+
+      <form id="search-form">
+        <div class="primary-search-row">
+          <label class="grow-field">
+            <span>Title, description, or keyword</span>
+            <input type="search" name="text" placeholder="e.g. aging, liver, lipidomics">
+          </label>
+          <label class="grow-field">
+            <span>Biological context</span>
+            <input type="search" name="biological_context" placeholder="e.g. inflammation, mouse, plasma">
+          </label>
+          <button class="primary-button search-button" type="submit">Search catalog</button>
+        </div>
+        <div class="filter-grid">
+          <label><span>Repository</span><select name="repository"><option value="">All repositories</option></select></label>
+          <label><span>Separation</span><select name="separation"><option value="">All separation types</option></select></label>
+          <label><span>Chromatography</span><select name="chromatography"><option value="">All chromatography</option></select></label>
+          <label><span>Ion mode</span><select name="ion_mode"><option value="">All ion modes</option></select></label>
+          <label><span>Acquisition</span><select name="acquisition_mode"><option value="">All acquisition modes</option></select></label>
+          <label><span>Target omics</span><select name="target_omics"><option value="">All omics types</option></select></label>
+          <label><span>Review status</span><select name="review_status"><option value="">All review states</option></select></label>
+          <label><span>Maximum download (GiB)</span><input type="number" name="max_download_gb" min="0" step="0.1" placeholder="No limit"></label>
+        </div>
+        <div class="form-actions">
+          <button class="text-button" id="clear-button" type="button">Clear filters</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="results-panel" aria-labelledby="results-title">
+      <div class="results-toolbar">
+        <h2 id="results-title">Analysis units</h2>
+        <p id="results-message">Loading local catalog...</p>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Repository / accession</th>
+              <th>Study and analysis unit</th>
+              <th>Technical profile</th>
+              <th>Samples</th>
+              <th>Download</th>
+              <th>Review</th>
+              <th><span class="visually-hidden">Open</span></th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="empty-state" hidden>
+        <h3>No matching analysis units</h3>
+        <p>Broaden the technical filters or try a different biological context.</p>
+      </div>
+    </section>
+
+    <section class="crawl-panel" aria-labelledby="crawl-title">
+      <div>
+        <p class="eyebrow">PROVENANCE</p>
+        <h2 id="crawl-title">Latest metadata crawls</h2>
+      </div>
+      <div class="crawl-list" id="crawl-list"></div>
+    </section>
+  </main>
+
+  <dialog id="unit-dialog">
+    <div class="dialog-shell">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow" id="dialog-repository"></p>
+          <h2 id="dialog-title">Analysis unit</h2>
+        </div>
+        <button class="close-button" id="dialog-close" type="button" aria-label="Close details">Close</button>
+      </div>
+      <div id="dialog-content" class="dialog-content"></div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

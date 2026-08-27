@@ -110,6 +110,56 @@ class Catalog:
             "class_proposals": self.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0],
         }
 
+    def overview(self) -> dict[str, Any]:
+        """Return compact aggregates and filter values for the local GUI."""
+        self.initialize()
+        repository_rows = self.connection.execute(
+            """
+            SELECT s.repository, COUNT(DISTINCT s.study_id) AS studies,
+                   COUNT(DISTINCT u.unit_id) AS analysis_units,
+                   COUNT(DISTINCT sm.sample_pk) AS samples
+            FROM study s
+            LEFT JOIN analysis_unit u ON u.study_id = s.study_id
+            LEFT JOIN sample sm ON sm.unit_id = u.unit_id
+            GROUP BY s.repository
+            ORDER BY s.repository
+            """
+        ).fetchall()
+        review_rows = self.connection.execute(
+            "SELECT review_status, COUNT(*) AS count FROM analysis_unit "
+            "GROUP BY review_status ORDER BY review_status"
+        ).fetchall()
+        latest_crawls = self.connection.execute(
+            """
+            SELECT repository, started_at, completed_at, status, discovered_count,
+                   hydrated_count, unchanged_count, failed_count, crawler_version
+            FROM crawl_run ORDER BY started_at DESC LIMIT 12
+            """
+        ).fetchall()
+        filters = {}
+        for key, column in (
+            ("repositories", "s.repository"),
+            ("separations", "u.separation"),
+            ("chromatographies", "u.chromatography"),
+            ("ion_modes", "u.ion_mode"),
+            ("acquisition_modes", "u.acquisition_mode"),
+            ("target_omics", "u.target_omics"),
+            ("review_statuses", "u.review_status"),
+        ):
+            rows = self.connection.execute(
+                f"SELECT DISTINCT {column} AS value FROM analysis_unit u "
+                "JOIN study s ON s.study_id = u.study_id "
+                f"WHERE {column} <> '' ORDER BY {column} COLLATE NOCASE"
+            ).fetchall()
+            filters[key] = [str(row["value"]) for row in rows]
+        return {
+            **self.stats(),
+            "repositories": [dict(row) for row in repository_rows],
+            "review_status": [dict(row) for row in review_rows],
+            "latest_crawls": [dict(row) for row in latest_crawls],
+            "filters": filters,
+        }
+
     def ingest_study(self, study: StudyRecord) -> dict[str, int | str]:
         self.initialize()
         source_hash = study.source_hash()

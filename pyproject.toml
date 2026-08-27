@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msdial-repository-catalog"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local, provenance-aware metadata catalog for public metabolomics reanalysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,12 +18,16 @@ mcp = ["mcp[cli]>=1.28,<3"]
 [project.scripts]
 msdial-repository-catalog = "msdial_repository_catalog.cli:main"
 msdial-repository-catalog-mcp = "msdial_repository_catalog.mcp_server:main"
+msdial-repository-catalog-gui = "msdial_repository_catalog.gui_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"msdial_repository_catalog.gui" = ["*.html", "*.css", "*.js"]
 
 [tool.unittest]
 start-directory = "tests"
