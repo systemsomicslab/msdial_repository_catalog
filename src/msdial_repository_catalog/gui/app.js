@@ -112,6 +112,15 @@ function renderUpdate(job) {
   const log = document.querySelector("#update-log");
   log.textContent = (job.logs || []).join("\n");
   log.scrollTop = log.scrollHeight;
+  const failures = job.failures || [];
+  const failureDetails = document.querySelector("#update-failures");
+  failureDetails.hidden = failures.length === 0;
+  document.querySelector("#update-failures-summary").textContent = `${number(failures.length)} failed accession(s): show details`;
+  document.querySelector("#update-failure-list").replaceChildren(...failures.map(item => {
+    const row = element("div", "failure-row");
+    row.append(element("strong", "", item.accession || "Unknown accession"), element("span", "", item.error || "Unknown error"));
+    return row;
+  }));
 }
 
 function isUpdateActive(value) { return ["queued", "running", "cancelling"].includes(value); }

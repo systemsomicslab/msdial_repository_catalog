@@ -38,6 +38,21 @@ class FakeAdapter:
 
 
 class UpdateJobTests(unittest.TestCase):
+    def test_duplicate_sample_rows_are_merged_during_ingest(self) -> None:
+        payload = project()
+        payload["analysis_units"][0]["sample_metadata"] = [
+            {"sample_id": "S1", "raw_file": "S1.raw", "values": {"Group": "Control"}},
+            {"sample_id": "S1", "raw_file": "S1.raw", "values": {"Batch": "2"}},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            with Catalog(Path(temporary) / "catalog.sqlite") as catalog:
+                study = project_to_study(payload)
+                catalog.ingest_study(study)
+                unit = catalog.get_unit(study.analysis_units[0].unit_id)
+            self.assertEqual(1, len(unit["samples"]))
+            self.assertEqual("Control", unit["samples"][0]["attributes"]["Group"])
+            self.assertEqual("2", unit["samples"][0]["attributes"]["Batch"])
+
     def test_indexed_update_refreshes_only_local_accessions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "catalog.sqlite"
