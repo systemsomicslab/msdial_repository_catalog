@@ -30,10 +30,13 @@ async function initialize() {
 }
 
 function renderUpdateModeNote() {
-  const discover = document.querySelector("#update-mode").value === "discover";
-  document.querySelector("#update-mode-note").textContent = discover
-    ? "Ask each public repository for its current accession index, then fetch records. This can take hours for a full catalog."
-    : "Re-check only records already stored locally. This is the bounded routine update.";
+  const mode = document.querySelector("#update-mode").value;
+  const messages = {
+    indexed: "Re-check only records already stored locally. This is the bounded routine update.",
+    unindexed: "Fetch the public accession index, remove records already stored locally, then apply the optional limit. Repeat this mode to grow the catalog without re-reading completed accessions.",
+    discover: "Fetch the public accession index and re-check every record, including records already stored locally. This can take hours.",
+  };
+  document.querySelector("#update-mode-note").textContent = messages[mode] || messages.indexed;
 }
 
 async function startUpdate() {

@@ -83,11 +83,13 @@ it never downloads mass-spectrometry raw data. The GUI provides:
 - Analysis Unit results rather than accession-only results;
 - review warnings and repository provenance;
 - sample metadata and raw-file manifest previews.
-- bounded indexed updates and full discovery crawls with progress, ETA, and cancellation.
+- indexed refresh, unindexed-only growth, and full discovery crawls with progress, ETA, and cancellation.
 
 The routine `Refresh indexed accessions` scope re-fetches only studies already
-present in the local catalog. `Discover new and refresh all` first obtains the
-current public accession index and can therefore take hours for a large source.
+present in the local catalog. `Discover and fetch unindexed accessions only`
+subtracts local accessions before applying the optional limit, so repeated
+bounded runs grow the catalog without re-reading completed records. `Discover
+new and refresh all` re-checks every public record and can therefore take hours.
 Only one update runs at a time, and repositories are processed sequentially.
 
 Use `--no-browser` when starting it from an agent or service, and set a different
@@ -108,12 +110,35 @@ chmod +x scripts/start-gui.sh
 Both source-checkout launchers use `catalog-data/catalog.sqlite` unless
 `MSDIAL_REPOSITORY_CATALOG` is set.
 
-Create a release-ready compressed SQLite snapshot:
+Create a release-ready thin SQLite snapshot. Thin catalogs retain searchable
+normalized metadata but omit archived repository response bodies and local
+Class decisions:
 
 ```powershell
 msdial-repository-catalog --database catalog-data/catalog.sqlite snapshot `
-  dist/msdial-repository-catalog.sqlite.gz
+  dist/msdial-repository-catalog.sqlite.gz --profile thin
 ```
+
+Generate one thin asset per repository and an aggregate release manifest:
+
+```powershell
+msdial-repository-catalog --database catalog-data/catalog.sqlite `
+  release-bundle dist/catalog-release
+```
+
+Source response bodies are gzip-compressed and deduplicated by SHA-256 inside a
+local full catalog. Existing schema-1 databases can be migrated after all GUI,
+CLI, and scheduler writers have stopped:
+
+```powershell
+msdial-repository-catalog --database catalog-data/catalog.sqlite storage-report
+msdial-repository-catalog --database catalog-data/catalog.sqlite compact-storage --vacuum
+```
+
+Do not commit generated SQLite files to Git. See
+[Storage profiles](docs/storage_profiles.md) for the distribution architecture,
+migration procedure, and separation between shareable catalog data and local
+analysis decisions.
 
 ## Claude/Codex MCP
 
@@ -186,7 +211,8 @@ Records imported through this bridge retain a warning when the old adapter
 collapsed an accession into one analysis unit. New catalog builds should use
 the native `crawl` command.
 
-See [Architecture](docs/architecture.md), [Schema](docs/schema.md), and
+See [Architecture](docs/architecture.md), [Schema](docs/schema.md),
+[Storage profiles](docs/storage_profiles.md), and
 [Agent Class contract](docs/agent_class_contract.md). The future response layer
 is described in [Metabolite contextome model](docs/contextome_model.md).
 

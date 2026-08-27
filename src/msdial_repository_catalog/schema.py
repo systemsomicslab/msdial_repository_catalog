@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 BASE_SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS study (
     source_updated_at TEXT NOT NULL DEFAULT '',
     retrieved_at TEXT NOT NULL DEFAULT '',
     parser_version TEXT NOT NULL DEFAULT '',
+    current_snapshot_id TEXT NOT NULL DEFAULT '',
     source_payload_json TEXT NOT NULL DEFAULT '{}',
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(repository, accession)
@@ -44,9 +45,19 @@ CREATE TABLE IF NOT EXISTS source_snapshot (
     source_hash TEXT NOT NULL,
     retrieved_at TEXT NOT NULL,
     parser_version TEXT NOT NULL DEFAULT '',
+    source_blob_hash TEXT NOT NULL DEFAULT '',
     source_payload_json TEXT NOT NULL DEFAULT '{}',
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(study_id, source_hash, parser_version)
+);
+
+CREATE TABLE IF NOT EXISTS source_blob (
+    source_hash TEXT PRIMARY KEY,
+    encoding TEXT NOT NULL DEFAULT 'gzip-json-v1',
+    payload BLOB NOT NULL,
+    uncompressed_bytes INTEGER NOT NULL,
+    compressed_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS publication (
