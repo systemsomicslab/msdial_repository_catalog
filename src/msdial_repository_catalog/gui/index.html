@@ -38,6 +38,58 @@
       </div>
     </section>
 
+    <section class="update-panel" aria-labelledby="update-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">CATALOG MAINTENANCE</p>
+          <h2 id="update-title">Update repository metadata</h2>
+          <p class="section-note">Metadata only: this operation does not download mass-spectrometry raw data.</p>
+        </div>
+        <span class="job-state" id="update-state">Idle</span>
+      </div>
+      <div class="update-grid">
+        <fieldset>
+          <legend>Repository sources</legend>
+          <div class="repository-checks">
+            <label><input type="checkbox" name="update_repository" value="metabolomics_workbench" checked> Metabolomics Workbench</label>
+            <label><input type="checkbox" name="update_repository" value="metabolights" checked> MetaboLights</label>
+            <label><input type="checkbox" name="update_repository" value="mb_post" checked> MB-POST</label>
+            <label><input type="checkbox" name="update_repository" value="metabobank" checked> MetaboBank</label>
+          </div>
+        </fieldset>
+        <label>
+          <span>Update scope</span>
+          <select id="update-mode">
+            <option value="indexed">Refresh indexed accessions</option>
+            <option value="discover">Discover new and refresh all</option>
+          </select>
+          <small id="update-mode-note">Re-check only records already stored locally. This is the bounded routine update.</small>
+        </label>
+        <label>
+          <span>Maximum accessions per repository</span>
+          <input id="update-limit" type="number" min="1" step="1" placeholder="No limit">
+          <small>Useful for testing or dividing a large discovery crawl into smaller runs.</small>
+        </label>
+      </div>
+      <div class="update-actions">
+        <button class="primary-button" id="update-start" type="button">Start metadata update</button>
+        <button class="secondary-button" id="update-cancel" type="button" disabled>Cancel after current accession</button>
+      </div>
+      <div class="update-progress" id="update-progress" hidden>
+        <div class="progress-heading">
+          <strong id="update-message">Preparing update...</strong>
+          <span id="update-timing">Elapsed 0 sec / ETA calculating</span>
+        </div>
+        <progress id="update-meter" max="100" value="0"></progress>
+        <div class="progress-details">
+          <span id="update-position">Repository 0 / 0</span>
+          <span id="update-count">0 / 0 accessions</span>
+          <span id="update-outcomes">0 updated / 0 unchanged / 0 failed</span>
+        </div>
+        <pre id="update-log" aria-label="Catalog update log"></pre>
+      </div>
+    </section>
+
     <section class="search-panel" aria-labelledby="search-title">
       <div class="section-heading search-heading">
         <div>

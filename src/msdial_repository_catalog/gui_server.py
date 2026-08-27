@@ -14,11 +14,13 @@ from typing import Any
 
 from .mcp_server import DEFAULT_DATABASE
 from .storage import Catalog
+from .update_jobs import REPOSITORIES, UpdateJobManager
 
 
 class CatalogGuiApplication:
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database).expanduser().resolve()
+        self.updates = UpdateJobManager(self.database)
 
     def status(self) -> dict[str, Any]:
         with Catalog(self.database) as catalog:
@@ -46,6 +48,24 @@ class CatalogGuiApplication:
     def unit(self, unit_id: str) -> dict[str, Any]:
         with Catalog(self.database) as catalog:
             return catalog.get_unit(unit_id)
+
+    def update_status(self) -> dict[str, Any]:
+        return self.updates.status()
+
+    def start_update(self, payload: dict[str, Any]) -> dict[str, Any]:
+        repositories = payload.get("repositories") or list(REPOSITORIES)
+        if not isinstance(repositories, list):
+            raise ValueError("Repositories must be a list.")
+        raw_limit = payload.get("limit")
+        limit = int(raw_limit) if raw_limit not in {None, ""} else None
+        return self.updates.start(
+            [str(value) for value in repositories],
+            mode=str(payload.get("mode") or "indexed"),
+            limit=limit,
+        )
+
+    def cancel_update(self) -> dict[str, Any]:
+        return self.updates.cancel()
 
 
 class CatalogGuiServer(ThreadingHTTPServer):
@@ -79,6 +99,9 @@ class CatalogGuiRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self._json({"status": "ok"})
                 return
+            if parsed.path == "/api/update/status":
+                self._json(self.server.application.update_status())
+                return
             self._static(parsed.path)
         except KeyError as error:
             self._json({"error": str(error)}, HTTPStatus.NOT_FOUND)
@@ -86,6 +109,35 @@ class CatalogGuiRequestHandler(BaseHTTPRequestHandler):
             self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except Exception as error:
             self._json({"error": f"Catalog GUI request failed: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            payload = self._read_json()
+            if parsed.path == "/api/update/start":
+                self._json(self.server.application.start_update(payload), HTTPStatus.ACCEPTED)
+                return
+            if parsed.path == "/api/update/cancel":
+                self._json(self.server.application.cancel_update(), HTTPStatus.ACCEPTED)
+                return
+            self._json({"error": "Unknown endpoint."}, HTTPStatus.NOT_FOUND)
+        except RuntimeError as error:
+            self._json({"error": str(error)}, HTTPStatus.CONFLICT)
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        except Exception as error:
+            self._json({"error": f"Catalog GUI request failed: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 65536:
+            raise ValueError("Request body is too large.")
+        if length == 0:
+            return {}
+        value = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return value
 
     def _static(self, path: str) -> None:
         asset = {

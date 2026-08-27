@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { overview: null, matches: [] };
+const state = { overview: null, matches: [], update: null, updateTimer: null };
 const form = document.querySelector("#search-form");
 const dialog = document.querySelector("#unit-dialog");
 
@@ -10,6 +10,9 @@ document.querySelector("#clear-button").addEventListener("click", () => { form.r
 document.querySelector("#refresh-button").addEventListener("click", initialize);
 document.querySelector("#dialog-close").addEventListener("click", () => dialog.close());
 dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+document.querySelector("#update-start").addEventListener("click", startUpdate);
+document.querySelector("#update-cancel").addEventListener("click", cancelUpdate);
+document.querySelector("#update-mode").addEventListener("change", renderUpdateModeNote);
 
 async function initialize() {
   setMessage("Loading local catalog...");
@@ -17,12 +20,101 @@ async function initialize() {
     state.overview = await fetchJson("/api/status");
     renderOverview(state.overview);
     populateFilters(state.overview.filters || {});
+    renderUpdateModeNote();
+    await refreshUpdateStatus();
     await search();
   } catch (error) {
     showError(error);
     setMessage("The catalog could not be loaded.");
   }
 }
+
+function renderUpdateModeNote() {
+  const discover = document.querySelector("#update-mode").value === "discover";
+  document.querySelector("#update-mode-note").textContent = discover
+    ? "Ask each public repository for its current accession index, then fetch records. This can take hours for a full catalog."
+    : "Re-check only records already stored locally. This is the bounded routine update.";
+}
+
+async function startUpdate() {
+  const repositories = [...document.querySelectorAll('input[name="update_repository"]:checked')]
+    .map(input => input.value);
+  if (!repositories.length) { showError(new Error("Select at least one repository source.")); return; }
+  const rawLimit = document.querySelector("#update-limit").value.trim();
+  const payload = {
+    repositories,
+    mode: document.querySelector("#update-mode").value,
+    limit: rawLimit ? Number(rawLimit) : null,
+  };
+  try {
+    state.update = await postJson("/api/update/start", payload);
+    renderUpdate(state.update);
+    scheduleUpdatePoll();
+  } catch (error) { showError(error); }
+}
+
+async function cancelUpdate() {
+  try {
+    state.update = await postJson("/api/update/cancel", {});
+    renderUpdate(state.update);
+    scheduleUpdatePoll();
+  } catch (error) { showError(error); }
+}
+
+async function refreshUpdateStatus() {
+  try {
+    state.update = await fetchJson("/api/update/status");
+    renderUpdate(state.update);
+    if (isUpdateActive(state.update.state)) scheduleUpdatePoll();
+  } catch (error) { showError(error); }
+}
+
+function scheduleUpdatePoll() {
+  window.clearTimeout(state.updateTimer);
+  state.updateTimer = window.setTimeout(pollUpdate, 1000);
+}
+
+async function pollUpdate() {
+  const previous = state.update?.state;
+  try {
+    state.update = await fetchJson("/api/update/status");
+    renderUpdate(state.update);
+    if (isUpdateActive(state.update.state)) {
+      scheduleUpdatePoll();
+    } else if (isUpdateActive(previous)) {
+      state.overview = await fetchJson("/api/status");
+      renderOverview(state.overview);
+      populateFilters(state.overview.filters || {});
+      await search();
+    }
+  } catch (error) { showError(error); }
+}
+
+function renderUpdate(job) {
+  const active = isUpdateActive(job.state);
+  const progress = document.querySelector("#update-progress");
+  progress.hidden = job.state === "idle";
+  const badge = document.querySelector("#update-state");
+  badge.textContent = displayStatus(job.state);
+  badge.className = `job-state ${active ? "active" : job.state.includes("failed") || job.state.includes("error") ? "failed" : ""}`;
+  document.querySelector("#update-start").disabled = active;
+  document.querySelector("#update-cancel").disabled = !active || job.state === "cancelling";
+  document.querySelectorAll('input[name="update_repository"], #update-mode, #update-limit')
+    .forEach(control => { control.disabled = active; });
+  document.querySelector("#update-message").textContent = job.message || displayStatus(job.stage);
+  document.querySelector("#update-meter").value = Number(job.percent || 0);
+  document.querySelector("#update-timing").textContent = `Elapsed ${formatDuration(job.elapsed_seconds)} / ETA ${job.eta_seconds == null ? "calculating" : formatDuration(job.eta_seconds)}`;
+  document.querySelector("#update-position").textContent = `Repository ${number(job.repository_position)} / ${number(job.repository_count)}${job.repository ? `: ${displayRepository(job.repository)}` : ""}`;
+  document.querySelector("#update-count").textContent = job.total
+    ? `${number(job.completed)} / ${number(job.total)} accessions${job.accession ? `: ${job.accession}` : ""}`
+    : (job.accession || "Accessions not counted yet");
+  document.querySelector("#update-outcomes").textContent = `${number(job.hydrated)} updated / ${number(job.unchanged)} unchanged / ${number(job.failed)} failed`;
+  const log = document.querySelector("#update-log");
+  log.textContent = (job.logs || []).join("\n");
+  log.scrollTop = log.scrollHeight;
+}
+
+function isUpdateActive(value) { return ["queued", "running", "cancelling"].includes(value); }
 
 async function search() {
   const params = new URLSearchParams(new FormData(form));
@@ -252,6 +344,15 @@ function formatBytes(value) {
   return `${bytes.toFixed(index > 1 ? 2 : 0)} ${units[index]}`;
 }
 function formatDate(value) { return value ? new Date(value).toLocaleString() : "Not completed"; }
+function formatDuration(value) {
+  const total = Math.max(0, Math.round(Number(value || 0)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours} hr ${minutes} min`;
+  if (minutes) return `${minutes} min ${seconds} sec`;
+  return `${seconds} sec`;
+}
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -260,6 +361,16 @@ function element(tag, className = "", text = "") {
 }
 async function fetchJson(url) {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
+  const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   return payload;

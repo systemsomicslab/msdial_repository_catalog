@@ -91,11 +91,23 @@ class Catalog:
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
-                    "completed_with_errors" if summary.failed else "completed",
+                    (
+                        "cancelled" if getattr(summary, "cancelled", False)
+                        else "completed_with_errors" if summary.failed else "completed"
+                    ),
                     summary.hydrated, summary.unchanged, summary.failed,
                     _json({"failures": summary.failures}), crawl_run_id,
                 ),
             )
+
+    def accessions(self, repository: str) -> list[str]:
+        """Return the locally indexed accessions for a repository."""
+        self.initialize()
+        rows = self.connection.execute(
+            "SELECT accession FROM study WHERE repository = ? ORDER BY accession COLLATE NOCASE",
+            (repository,),
+        ).fetchall()
+        return [str(row["accession"]) for row in rows]
 
     def stats(self) -> dict[str, Any]:
         self.initialize()
