@@ -31,6 +31,16 @@ def main(argv: list[str] | None = None) -> int:
     crawl.add_argument("--limit", type=int)
     crawl.add_argument("--interactive-app-root", default="")
 
+    native = commands.add_parser(
+        "crawl", help="Crawl repository metadata with the native analysis-unit adapters"
+    )
+    native.add_argument(
+        "repository",
+        choices=["metabolomics_workbench", "metabolights", "mb_post", "metabobank"],
+    )
+    native.add_argument("--accession", action="append")
+    native.add_argument("--limit", type=int)
+
     search = commands.add_parser("search", help="Search local analysis units")
     for name in (
         "text", "repository", "separation", "chromatography", "ion-mode",
@@ -72,6 +82,22 @@ def main(argv: list[str] | None = None) -> int:
 
             summary = CatalogCrawler(catalog).sync(
                 InteractiveAdapterBridge(args.repository, args.interactive_app_root),
+                accessions=args.accession,
+                limit=args.limit,
+            )
+            result = {
+                "repository": summary.repository,
+                "discovered": summary.discovered,
+                "hydrated": summary.hydrated,
+                "unchanged": summary.unchanged,
+                "failed": summary.failed,
+                "failures": summary.failures,
+            }
+        elif args.command == "crawl":
+            from .adapters import native_adapter
+
+            summary = CatalogCrawler(catalog).sync(
+                native_adapter(args.repository),
                 accessions=args.accession,
                 limit=args.limit,
             )

@@ -30,7 +30,7 @@ class CrawlSummary:
 
 
 class CatalogCrawler:
-    def __init__(self, catalog: Catalog, crawler_version: str = "0.1.0") -> None:
+    def __init__(self, catalog: Catalog, crawler_version: str = "0.2.0") -> None:
         self.catalog = catalog
         self.crawler_version = crawler_version
 

@@ -87,12 +87,45 @@ analysis execution.
 
 ## Repository adapters
 
-The first milestone accepts normalized JSON produced by the existing MS-DIAL
-Interactive adapters. Repository-native crawlers are introduced behind the
-`RepositoryAdapter` protocol so that Metabolomics Workbench, MetaboLights,
-MB-POST, and MetaboBank can be migrated independently.
+The catalog includes independent native metadata adapters for Metabolomics
+Workbench, MetaboLights, MB-POST, and MetaboBank. They retrieve repository
+metadata and file manifests only; they do not download raw mass-spectrometry
+data.
 
-During migration, the validated Interactive adapters can populate the catalog:
+Hydrate selected accessions directly into the local catalog:
+
+```powershell
+msdial-repository-catalog --database catalog-data/catalog.sqlite `
+  crawl metabolomics_workbench --accession ST000941
+
+msdial-repository-catalog --database catalog-data/catalog.sqlite `
+  crawl metabolights --accession MTBLS341
+
+msdial-repository-catalog --database catalog-data/catalog.sqlite `
+  crawl mb_post --accession MPST000007
+
+msdial-repository-catalog --database catalog-data/catalog.sqlite `
+  crawl metabobank --accession MTBKS47
+```
+
+Omit `--accession` to crawl discovered records, and use `--limit` for a bounded
+development run. A public record failure is logged without terminating the
+remaining crawl.
+
+Unitization follows repository-native boundaries:
+
+- Metabolomics Workbench: one unit per `analysis_id`
+- MetaboLights: one unit per assay file
+- MB-POST: one unit per compatible `analyticalCondition` preset signature
+- MetaboBank: one unit per distinct SDRF technical signature and file group
+
+When sample-to-analysis or archive-to-analysis linkage is not declared, the
+adapter retains the source references and marks the unit `needs_review`. It does
+not silently invent a definitive assignment. See
+[Repository adapters](docs/repository_adapters.md) for current limitations and
+validation records.
+
+The original MS-DIAL Interactive bridge remains available for compatibility:
 
 ```powershell
 msdial-repository-catalog --database catalog-data/catalog.sqlite `
@@ -101,8 +134,8 @@ msdial-repository-catalog --database catalog-data/catalog.sqlite `
 ```
 
 Records imported through this bridge retain a warning when the old adapter
-collapsed an accession into one analysis unit. They are searchable, but must not
-be treated as reviewed mixed-method classifications.
+collapsed an accession into one analysis unit. New catalog builds should use
+the native `crawl` command.
 
 See [Architecture](docs/architecture.md), [Schema](docs/schema.md), and
 [Agent Class contract](docs/agent_class_contract.md). The future response layer

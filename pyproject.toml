@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msdial-repository-catalog"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, provenance-aware metadata catalog for public metabolomics reanalysis"
 readme = "README.md"
 requires-python = ">=3.10"

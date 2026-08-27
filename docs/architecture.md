@@ -52,6 +52,25 @@ The stable unit ID combines repository, accession, source subrecord, and the
 normalized technical signature. A changed signature creates a new unit instead
 of silently rewriting an incompatible historical unit.
 
+### Repository-specific unitization
+
+- **Metabolomics Workbench** uses `analysis_id`. Factors are often study-level;
+  mixed-analysis studies therefore remain in review until sample/file linkage
+  is confirmed.
+- **MetaboLights** uses each ISA assay file as a unit. Sample rows and spectral
+  file references are read from that assay, while biological characteristics
+  are joined from the study table and ISA materials.
+- **MB-POST** groups raw files by the complete technical signature derived from
+  each file's `analyticalCondition` preset. Sample and preparation presets stay
+  attached to the corresponding file/sample.
+- **MetaboBank** groups SDRF rows by separation, chromatography, polarity,
+  acquisition, mobility, instrument, and omics. Vendor directories and SCIEX
+  sidecars are expanded from the repository file list.
+
+Unknown DDA/DIA/AIF status is intentionally preserved as `Unknown`. A later raw
+header inspection may confirm it, but repository prose alone is not treated as
+stronger evidence than a declared assay field.
+
 ## Distribution
 
 Schema, crawler code, tests, and curated overrides belong in Git. Generated
