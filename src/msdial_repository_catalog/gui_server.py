@@ -97,7 +97,10 @@ class CatalogGuiRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.server.application.unit(unit_id))
                 return
             if parsed.path == "/api/health":
-                self._json({"status": "ok"})
+                self._json({
+                    "status": "ok",
+                    "database": str(self.server.application.database),
+                })
                 return
             if parsed.path == "/api/update/status":
                 self._json(self.server.application.update_status())

@@ -16,6 +16,25 @@ from .models import ClassProposal, StudyRecord, stable_id
 from .schema import BASE_SCHEMA, FTS_SCHEMA, SCHEMA_VERSION
 
 
+def _normalize_publications(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: dict[str, dict[str, str]] = {}
+    for record in records:
+        title = str(record.get("title") or "").strip()
+        doi = str(record.get("doi") or "").strip()
+        pubmed = str(record.get("pubmed_id") or "").strip()
+        if pubmed.casefold().startswith("10.") and "/" in pubmed:
+            doi = doi or pubmed
+            pubmed = ""
+        key = doi.casefold() or (
+            f"pmid:{pubmed.casefold()}" if pubmed else f"title:{title.casefold()}"
+        )
+        if key not in normalized:
+            normalized[key] = {"title": title, "doi": doi, "pubmed_id": pubmed}
+        elif title and not normalized[key]["title"]:
+            normalized[key]["title"] = title
+    return list(normalized.values())
+
+
 class Catalog:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
@@ -243,7 +262,7 @@ class Catalog:
                 ),
             )
             self.connection.execute("DELETE FROM publication WHERE study_id = ?", (study.study_id,))
-            for publication in study.publications:
+            for publication in _normalize_publications(study.publications):
                 publication_id = stable_id(
                     study.study_id, publication.get("doi"), publication.get("pubmed_id"),
                     publication.get("title"),
@@ -532,6 +551,7 @@ class Catalog:
         *,
         text: str = "",
         repository: str = "",
+        accessions: list[str] | None = None,
         separation: str = "",
         chromatography: str = "",
         ion_mode: str = "",
@@ -546,6 +566,11 @@ class Catalog:
         joins = []
         where = []
         params: list[Any] = []
+        normalized_accessions = [str(item).strip() for item in (accessions or []) if str(item).strip()]
+        if normalized_accessions:
+            placeholders = ",".join("?" for _ in normalized_accessions)
+            where.append(f"s.accession IN ({placeholders}) COLLATE NOCASE")
+            params.extend(normalized_accessions)
         if text:
             if self.fts_enabled:
                 joins.append("JOIN study_fts fts ON fts.study_id = s.study_id")
@@ -589,7 +614,31 @@ class Catalog:
             """,
             params,
         ).fetchall()
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        for item in result:
+            item["sample_count"] = self._analysis_sample_count(str(item["unit_id"]))
+        return result
+
+    def _analysis_sample_count(self, unit_id: str) -> int:
+        from .class_proposal import normalize_analysis_unit
+
+        samples = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT sample_id, raw_file FROM sample WHERE unit_id = ? ORDER BY sample_id, raw_file",
+                (unit_id,),
+            )
+        ]
+        files = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT path, role, sample_id FROM raw_file WHERE unit_id = ? ORDER BY path",
+                (unit_id,),
+            )
+        ]
+        if not files:
+            return len(samples)
+        return int(normalize_analysis_unit({"samples": samples, "files": files})["sample_count"])
 
     def get_unit(self, unit_id: str) -> dict[str, Any]:
         self.initialize()
@@ -640,7 +689,45 @@ class Catalog:
                 "FROM raw_file WHERE unit_id = ? ORDER BY path", (unit_id,)
             )
         ]
-        return result
+        result["publications"] = _normalize_publications(
+            [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT title, doi, pubmed_id FROM publication "
+                    "WHERE study_id = ? ORDER BY publication_id",
+                    (result["study_id"],),
+                )
+            ]
+        )
+        from .class_proposal import normalize_analysis_unit
+
+        return normalize_analysis_unit(result)
+
+    def download_scope(self, urls: list[str]) -> dict[str, Any]:
+        values = sorted({str(value).strip() for value in urls if str(value).strip()})
+        if not values:
+            return {"bundle_bytes": 0, "bundle_shared_unit_count": 0, "urls": []}
+        placeholders = ",".join("?" for _ in values)
+        rows = self.connection.execute(
+            f"SELECT download_url, SUM(size_bytes) AS bundle_bytes, "
+            f"COUNT(DISTINCT unit_id) AS unit_count FROM raw_file "
+            f"WHERE download_url IN ({placeholders}) GROUP BY download_url",
+            values,
+        ).fetchall()
+        return {
+            "bundle_bytes": sum(int(row["bundle_bytes"] or 0) for row in rows),
+            "bundle_shared_unit_count": max(
+                (int(row["unit_count"] or 0) for row in rows), default=0
+            ),
+            "urls": [
+                {
+                    "url": str(row["download_url"]),
+                    "bytes": int(row["bundle_bytes"] or 0),
+                    "shared_unit_count": int(row["unit_count"] or 0),
+                }
+                for row in rows
+            ],
+        }
 
     def save_class_proposal(self, proposal: ClassProposal) -> None:
         from .class_proposal import validate_class_proposal

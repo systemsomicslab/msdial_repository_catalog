@@ -34,9 +34,17 @@ CLASS_PROPOSAL_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_class_proposal_request(unit: dict[str, Any], purpose: str) -> dict[str, Any]:
-    fields = candidate_fields(unit)
-    return {
+def build_class_proposal_request(
+    unit: dict[str, Any],
+    purpose: str,
+    *,
+    include_samples: bool = False,
+    sample_limit: int = 0,
+) -> dict[str, Any]:
+    samples = analysis_samples(unit)
+    analysis_unit = {**unit, "samples": samples}
+    fields = candidate_fields(analysis_unit)
+    request = {
         "task": "Propose MS-DIAL Class labels and an explicit statistical contrast.",
         "purpose": purpose,
         "analysis_unit": {
@@ -47,15 +55,7 @@ def build_class_proposal_request(unit: dict[str, Any], purpose: str) -> dict[str
             )
         },
         "candidate_fields": fields,
-        "samples": [
-            {
-                "sample_id": sample["sample_id"],
-                "raw_file": sample.get("raw_file", ""),
-                "attributes": sample.get("attributes", {}),
-                "contexts": sample.get("contexts", []),
-            }
-            for sample in unit.get("samples", [])
-        ],
+        "sample_count": len(samples),
         "instructions": [
             "Use biological fields that answer the stated purpose; do not choose fields only because they vary.",
             "Keep Blank, QC, Standard, batch, pairing, and analytical order available as design covariates.",
@@ -66,6 +66,19 @@ def build_class_proposal_request(unit: dict[str, Any], purpose: str) -> dict[str
         ],
         "output_schema": CLASS_PROPOSAL_SCHEMA,
     }
+    if include_samples:
+        if sample_limit > 0:
+            samples = samples[:sample_limit]
+        request["samples"] = [
+            {
+                "sample_id": sample["sample_id"],
+                "raw_file": sample.get("raw_file", ""),
+                "attributes": sample.get("attributes", {}),
+                "contexts": sample.get("contexts", []),
+            }
+            for sample in samples
+        ]
+    return request
 
 
 def candidate_fields(unit: dict[str, Any]) -> list[dict[str, Any]]:
@@ -107,7 +120,7 @@ def field_based_proposal(
     if not selected_fields:
         raise ValueError("At least one metadata field is required.")
     assignments = []
-    for sample in unit.get("samples", []):
+    for sample in analysis_samples(unit):
         attributes = sample.get("attributes", {})
         values = {field: _scalar(attributes.get(field)) or "NA" for field in selected_fields}
         label = "_".join(_class_token(values[field]) or "NA" for field in selected_fields)
@@ -134,7 +147,7 @@ def field_based_proposal(
 
 
 def validate_class_proposal(unit: dict[str, Any], proposal: ClassProposal) -> None:
-    expected = [str(item["sample_id"]) for item in unit.get("samples", [])]
+    expected = [str(item["sample_id"]) for item in analysis_samples(unit)]
     actual = [item.sample_id for item in proposal.assignments]
     duplicates = [sample for sample, count in Counter(actual).items() if count > 1]
     missing = sorted(set(expected) - set(actual))
@@ -157,6 +170,117 @@ def validate_class_proposal(unit: dict[str, Any], proposal: ClassProposal) -> No
             problems.append(f"invalid Class delimiter for {assignment.sample_id}")
     if problems:
         raise ValueError("Invalid Class proposal: " + "; ".join(problems))
+
+
+def analysis_samples(unit: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return one metadata row per primary MS-DIAL analysis input."""
+    samples = [dict(item) for item in unit.get("samples", [])]
+    files = normalize_file_roles(unit.get("files", []))
+    known_paths = {
+        str(item.get("path") or item.get("name") or "").replace("\\", "/").casefold()
+        for item in files
+    }
+    primary = [item for item in files if _file_role(item, known_paths) == "raw"]
+    if not primary:
+        return samples
+
+    selected: list[dict[str, Any]] = []
+    used_rows: set[int] = set()
+    for raw in primary:
+        raw_path = str(raw.get("path") or raw.get("name") or "")
+        raw_sample = str(raw.get("sample_id") or "")
+        match_index = next(
+            (
+                index
+                for index, sample in enumerate(samples)
+                if index not in used_rows
+                and _same_raw_file(str(sample.get("raw_file") or ""), raw_path)
+            ),
+            None,
+        )
+        if match_index is None and raw_sample:
+            match_index = next(
+                (
+                    index
+                    for index, sample in enumerate(samples)
+                    if index not in used_rows
+                    and str(sample.get("sample_id") or "").casefold() == raw_sample.casefold()
+                ),
+                None,
+            )
+        if match_index is None:
+            sample = {
+                "sample_id": raw_sample or _primary_stem(raw_path),
+                "raw_file": raw_path,
+                "attributes": {},
+                "contexts": [],
+            }
+        else:
+            used_rows.add(match_index)
+            sample = dict(samples[match_index])
+            sample["raw_file"] = raw_path
+        sample["related_files"] = [
+            str(item.get("path") or item.get("name") or "")
+            for item in files
+            if _primary_stem(str(item.get("path") or item.get("name") or ""))
+            == _primary_stem(raw_path)
+            and _file_role(item, known_paths) != "raw"
+        ]
+        selected.append(sample)
+    return selected
+
+
+def normalize_file_roles(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Classify primary, alternate, sidecar, and auxiliary raw-data containers."""
+    result = [dict(item) for item in files]
+    known_paths = {
+        str(item.get("path") or item.get("name") or "").replace("\\", "/").casefold()
+        for item in result
+    }
+    for item in result:
+        item["role"] = _file_role(item, known_paths)
+    return result
+
+
+def normalize_analysis_unit(unit: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical analysis-unit view used by every Catalog surface."""
+    files = normalize_file_roles(unit.get("files", []))
+    normalized = {**unit, "files": files}
+    normalized["samples"] = analysis_samples(normalized)
+    normalized["sample_count"] = len(normalized["samples"])
+    normalized["analysis_file_count"] = sum(
+        str(item.get("role") or "raw") == "raw" for item in files
+    )
+    return normalized
+
+
+def _file_role(item: dict[str, Any], known_paths: set[str]) -> str:
+    path = str(item.get("path") or item.get("name") or "").replace("\\", "/").casefold()
+    if path.endswith(".timeseries.data"):
+        return "auxiliary"
+    if path.endswith(".wiff.scan"):
+        return "sidecar"
+    role = str(item.get("role") or "raw")
+    if path.endswith(".wiff2") and path.removesuffix(".wiff2") + ".wiff" in known_paths:
+        return "raw_alternate"
+    return role
+
+
+def _primary_stem(path: str) -> str:
+    value = path.replace("\\", "/").casefold()
+    for suffix in (".timeseries.data", ".wiff.scan", ".wiff2", ".wiff"):
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _same_raw_file(left: str, right: str) -> bool:
+    left_value = left.replace("\\", "/").casefold()
+    right_value = right.replace("\\", "/").casefold()
+    return (
+        left_value == right_value
+        or left_value.rsplit("/", 1)[-1] == right_value.rsplit("/", 1)[-1]
+    )
 
 
 def _field_priority(field: str) -> float:
