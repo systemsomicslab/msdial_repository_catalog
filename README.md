@@ -99,15 +99,26 @@ port with `--port`. The default database is
 When the Python Scripts directory is on `PATH`, the equivalent installed command
 is `msdial-repository-catalog-gui`.
 
-From a source checkout, Windows users can also double-click
-`scripts/start-gui-windows.cmd`. On macOS or Linux:
+From a source checkout, Windows users can double-click
+`Start Repository Catalog.cmd` in the repository root. The launcher opens the
+default browser and keeps a small terminal window open while the Catalog is
+running. If a Catalog server is already running, it opens that server instead
+of starting a duplicate process.
+
+The Windows launcher uses `MSDIAL_REPOSITORY_CATALOG` when it is set. Otherwise,
+it selects the largest non-backup `.sqlite` file in `catalog-data`, which avoids
+opening a newly created empty database when a populated local catalog already
+exists. When no database exists, it creates `catalog-data/catalog.sqlite`.
+`scripts/start-gui-windows.cmd` remains available as the lower-level launcher.
+
+On macOS or Linux:
 
 ```bash
 chmod +x scripts/start-gui.sh
 ./scripts/start-gui.sh
 ```
 
-Both source-checkout launchers use `catalog-data/catalog.sqlite` unless
+The macOS/Linux launcher uses `catalog-data/catalog.sqlite` unless
 `MSDIAL_REPOSITORY_CATALOG` is set.
 
 Create a release-ready thin SQLite snapshot. Thin catalogs retain searchable

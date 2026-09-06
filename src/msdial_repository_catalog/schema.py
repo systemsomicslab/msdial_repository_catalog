@@ -275,6 +275,12 @@ CREATE INDEX IF NOT EXISTS idx_unit_filter ON analysis_unit(
     separation, chromatography, acquisition_mode, ion_mode, target_omics, review_status
 );
 CREATE INDEX IF NOT EXISTS idx_sample_unit ON sample(unit_id);
+CREATE INDEX IF NOT EXISTS idx_raw_file_unit ON raw_file(unit_id);
+CREATE INDEX IF NOT EXISTS idx_raw_file_download_url ON raw_file(download_url);
+CREATE INDEX IF NOT EXISTS idx_sample_attribute_sample ON sample_attribute(sample_pk);
+CREATE INDEX IF NOT EXISTS idx_sample_context_sample ON sample_context(sample_pk);
+CREATE INDEX IF NOT EXISTS idx_unit_context_unit ON analysis_unit_context(unit_id);
+CREATE INDEX IF NOT EXISTS idx_publication_study ON publication(study_id);
 CREATE INDEX IF NOT EXISTS idx_attribute_field ON sample_attribute(normalized_field, normalized_value);
 CREATE INDEX IF NOT EXISTS idx_context_category ON sample_context(category, normalized_value);
 CREATE INDEX IF NOT EXISTS idx_unit_context_category ON analysis_unit_context(category, normalized_value);

@@ -7,7 +7,13 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from .class_proposal import build_class_proposal_request, validate_class_proposal
+from .class_proposal import (
+    analysis_samples,
+    build_class_proposal_request,
+    field_based_proposal,
+    normalize_file_roles,
+    validate_class_proposal,
+)
 from .models import ClassAssignment, ClassProposal, stable_id
 from .storage import Catalog
 from .update_jobs import REPOSITORIES, UpdateJobManager
@@ -102,6 +108,7 @@ def msdial_catalog_storage_report(database: str = "") -> dict[str, Any]:
 def msdial_catalog_search(
     text: str = "",
     repository: str = "",
+    accessions: list[str] | None = None,
     separation: str = "",
     chromatography: str = "",
     ion_mode: str = "",
@@ -118,6 +125,7 @@ def msdial_catalog_search(
         matches = catalog.search(
             text=text,
             repository=repository,
+            accessions=accessions,
             separation=separation,
             chromatography=chromatography,
             ion_mode=ion_mode,
@@ -130,14 +138,71 @@ def msdial_catalog_search(
             ),
             limit=limit,
         )
-    return {"query": {"text": text, "biological_context": biological_context}, "matches": matches}
+    requested = [str(item).strip() for item in (accessions or []) if str(item).strip()]
+    found = sorted({str(item["accession"]) for item in matches})
+    return {
+        "query": {
+            "text": text,
+            "repository": repository,
+            "accessions": requested,
+            "biological_context": biological_context,
+        },
+        "matches": matches,
+        "accessions_found": found,
+        "accessions_missing": [item for item in requested if item not in found],
+    }
 
 
 @tool()
-def msdial_catalog_get_analysis_unit(unit_id: str, database: str = "") -> dict[str, Any]:
-    """Return one MS-DIAL-compatible analysis unit with source metadata and evidence."""
-    with Catalog(_database(database)) as catalog:
-        return catalog.get_unit(unit_id)
+def msdial_catalog_get_analysis_unit(
+    unit_id: str,
+    database: str = "",
+    include_samples: bool = False,
+    sample_limit: int = 0,
+    include_files: bool = False,
+    file_limit: int = 0,
+) -> dict[str, Any]:
+    """Return one bounded MS-DIAL-compatible analysis unit with its sample and file manifests.
+
+    Samples and files are both written beside the database and named by path
+    rather than inlined. A 200-file unit returned 57,647 characters, 99.6% of it
+    the file list, which no caller could receive.
+    """
+    database_path = _database(database)
+    with Catalog(database_path) as catalog:
+        unit = catalog.get_unit(unit_id)
+    samples = list(unit.get("samples", []))
+    files = list(unit.get("files", []))
+    handoffs = database_path.parent / "handoffs"
+    handoffs.mkdir(parents=True, exist_ok=True)
+    sample_path = handoffs / f"{unit_id}-samples.json"
+    file_path = handoffs / f"{unit_id}-files.json"
+    sample_path.write_text(
+        json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    file_path.write_text(
+        json.dumps(files, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    response = dict(unit)
+    response["sample_count"] = len(samples)
+    response["sample_table_path"] = str(sample_path.resolve())
+    response["file_count"] = len(files)
+    response["file_manifest_path"] = str(file_path.resolve())
+    if include_samples:
+        limit = max(0, int(sample_limit))
+        response["samples"] = samples[:limit] if limit else samples
+        response["samples_truncated"] = bool(limit and len(samples) > limit)
+    else:
+        response["samples"] = []
+        response["samples_omitted"] = True
+    if include_files:
+        limit = max(0, int(file_limit))
+        response["files"] = files[:limit] if limit else files
+        response["files_truncated"] = bool(limit and len(files) > limit)
+    else:
+        response["files"] = []
+        response["files_omitted"] = True
+    return response
 
 
 @tool()
@@ -145,10 +210,28 @@ def msdial_catalog_class_request(
     unit_id: str,
     purpose: str,
     database: str = "",
+    include_samples: bool = False,
+    sample_limit: int = 0,
 ) -> dict[str, Any]:
     """Build the bounded metadata request used by an agent to propose Class and contrasts."""
-    with Catalog(_database(database)) as catalog:
-        return build_class_proposal_request(catalog.get_unit(unit_id), purpose)
+    database_path = _database(database)
+    with Catalog(database_path) as catalog:
+        unit = catalog.get_unit(unit_id)
+    unit = {**unit, "samples": analysis_samples(unit)}
+    request = build_class_proposal_request(
+        unit,
+        purpose,
+        include_samples=include_samples,
+        sample_limit=max(0, int(sample_limit)),
+    )
+    sample_path = database_path.parent / "handoffs" / f"{unit_id}-samples.json"
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_path.write_text(
+        json.dumps(unit.get("samples", []), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    request["sample_table_path"] = str(sample_path.resolve())
+    return request
 
 
 @tool()
@@ -164,13 +247,38 @@ def msdial_catalog_save_class_proposal(
     database: str = "",
 ) -> dict[str, Any]:
     """Validate and save an agent Class proposal only after explicit user confirmation."""
+    assignments_payload = json.loads(assignments_json) if assignments_json.strip() else []
+    contrast = json.loads(contrast_definition_json or "{}")
+    with Catalog(_database(database)) as catalog:
+        unit = catalog.get_unit(unit_id)
+    if not assignments_payload:
+        proposal = field_based_proposal(unit, purpose, selected_fields, rationale)
+        proposal.contrast_definition = contrast
+        proposal.model = model or proposal.model
+        if not confirmed:
+            counts: dict[str, int] = {}
+            for item in proposal.assignments:
+                counts[item.class_label] = counts.get(item.class_label, 0) + 1
+            return {
+                "confirmation_required": True,
+                "proposal_preview": {
+                    "unit_id": unit_id,
+                    "selected_fields": selected_fields,
+                    "class_counts": counts,
+                    "assignment_count": len(proposal.assignments),
+                    "rationale": rationale,
+                    "contrast_definition": contrast,
+                },
+                "message": "Review the deterministic field projection before saving it.",
+            }
+        with Catalog(_database(database)) as catalog:
+            catalog.save_class_proposal(proposal)
+        return {"saved": True, "proposal": proposal.as_dict()}
     if not confirmed:
         return {
             "confirmation_required": True,
             "message": "Review the selected fields, every sample assignment, rationale, and contrast before saving.",
         }
-    assignments_payload = json.loads(assignments_json)
-    contrast = json.loads(contrast_definition_json or "{}")
     assignments = [
         ClassAssignment(
             sample_id=str(item["sample_id"]),
@@ -203,7 +311,6 @@ def msdial_catalog_save_class_proposal(
         prompt_hash=hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
     )
     with Catalog(_database(database)) as catalog:
-        unit = catalog.get_unit(unit_id)
         validate_class_proposal(unit, proposal)
         catalog.save_class_proposal(proposal)
     return {"saved": True, "proposal": proposal.as_dict()}
@@ -216,20 +323,50 @@ def msdial_catalog_reanalysis_handoff(
     database: str = "",
 ) -> dict[str, Any]:
     """Create a structured handoff for MS-DIAL Interactive without downloading raw data."""
-    with Catalog(_database(database)) as catalog:
+    database_path = _database(database)
+    with Catalog(database_path) as catalog:
         unit = catalog.get_unit(unit_id)
         proposal = catalog.get_class_proposal(class_proposal_id) if class_proposal_id else None
+        scope = catalog.download_scope(
+            [str(item.get("download_url") or "") for item in unit["files"]]
+        )
     required_review = [
         field
         for field in ("separation", "ion_mode", "acquisition_mode")
         if str(unit.get(field) or "Unknown") == "Unknown"
     ]
-    return {
+    blocking_reasons = [f"technical_metadata:{field}" for field in required_review]
+    if proposal is None:
+        blocking_reasons.append("class_proposal:missing")
+    files = _handoff_files(unit["files"])
+    primary_files = [item for item in files if item.get("role", "raw") == "raw"]
+    analytical_samples = {
+        str(item.get("sample_id") or item.get("path") or "") for item in primary_files
+    }
+    urls = {str(item.get("download_url") or "") for item in files if item.get("download_url")}
+    bundle_level = unit["repository"] == "mb_post" or len(urls) < len(files)
+    analysis_unit = {**unit, "files": files}
+    analysis_rows = analysis_samples(analysis_unit)
+    samples, unit_attributes = _compact_sample_metadata(analysis_rows)
+    sample_path = database_path.parent / "handoffs" / f"{unit_id}-samples.json"
+    file_path = database_path.parent / "handoffs" / f"{unit_id}-files.json"
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_path.write_text(
+        json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    file_path.write_text(
+        json.dumps(files, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    payload = {
         "schema": "msdial-repository-reanalysis-handoff.v1",
         "repository": unit["repository"],
         "accession": unit["accession"],
         "analysis_unit_id": unit_id,
         "source_subrecord_id": unit["source_subrecord_id"],
+        "title": unit.get("title", ""),
+        "description": unit.get("description", ""),
+        "publications": unit.get("publications", []),
+        "publication_status": _publication_status(unit),
         "technical_settings": {
             key: unit.get(key)
             for key in (
@@ -238,25 +375,98 @@ def msdial_catalog_reanalysis_handoff(
             )
         },
         "repository_url": unit.get("public_url", ""),
-        "files": unit["files"],
-        "sample_metadata": [
-            {
-                "sample_id": sample["sample_id"],
-                "raw_file": sample["raw_file"],
-                "attributes": sample["attributes"],
-            }
-            for sample in unit["samples"]
-        ],
+        "files": files,
+        "file_manifest_path": str(file_path.resolve()),
+        "download_scope": {
+            "kind": "accession_bundle_with_file_allowlist" if bundle_level else "unit_files",
+            "url_scope": "accession" if bundle_level else "file",
+            "allowlist_required": bundle_level,
+            "allowlist_keys": ["path", "checksum"],
+            "file_count": len(files),
+            "analysis_file_count": len(primary_files),
+            "total_file_bytes": sum(int(item.get("size_bytes") or 0) for item in files),
+            "bundle_bytes": scope["bundle_bytes"],
+            "bundle_shared_unit_count": scope["bundle_shared_unit_count"],
+            "bundle_urls": scope["urls"],
+            "note": (
+                "Download URLs may resolve to an accession bundle. Retain only paths listed "
+                "in files and verify checksums when supplied."
+                if bundle_level else "Each URL represents a unit-scoped file."
+            ),
+        },
+        "sample_count": len(analysis_rows),
+        "analytical_sample_count": len(analytical_samples),
+        "unit_attributes": unit_attributes,
+        "sample_table_path": str(sample_path.resolve()),
+        "sample_metadata": samples,
         "class_proposal": proposal,
         "review_status": unit["review_status"],
         "required_review": required_review,
-        "ready_for_download_planning": not required_review and proposal is not None,
+        "blocking_reasons": blocking_reasons,
+        "ready_for_download_planning": not blocking_reasons,
         "next_action": (
             "Pass this handoff to MS-DIAL Interactive for bounded download planning."
             if not required_review and proposal is not None
             else "Resolve required technical metadata and confirm a Class proposal first."
         ),
     }
+    handoff_path = database_path.parent / "handoffs" / f"{unit_id}.json"
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    response = dict(payload)
+    response["handoff_path"] = str(handoff_path.resolve())
+    response["sample_metadata"] = []
+    response["sample_metadata_omitted"] = True
+    response["files"] = []
+    response["files_omitted"] = True
+    return response
+
+
+def _publication_status(unit: dict[str, Any]) -> str:
+    if unit.get("publications"):
+        return "recorded"
+    warnings = " ".join(str(item) for item in unit.get("warnings", [])).casefold()
+    if any(token in warnings for token in ("metadata detail was unavailable", "metadata unavailable", "lookup failed")):
+        return "not_retrieved"
+    return "none_recorded"
+
+
+def _compact_sample_metadata(
+    samples: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not samples:
+        return [], {}
+    common_keys = set(samples[0].get("attributes", {}))
+    for sample in samples[1:]:
+        common_keys &= set(sample.get("attributes", {}))
+    constants = {
+        key: samples[0]["attributes"][key]
+        for key in common_keys
+        if all(
+            sample.get("attributes", {}).get(key) == samples[0]["attributes"][key]
+            for sample in samples
+        )
+    }
+    compact = [
+        {
+            "sample_id": sample["sample_id"],
+            "raw_file": sample.get("raw_file", ""),
+            "related_files": list(sample.get("related_files", [])),
+            "attributes": {
+                key: value
+                for key, value in sample.get("attributes", {}).items()
+                if key not in constants
+            },
+        }
+        for sample in samples
+    ]
+    return compact, constants
+
+
+def _handoff_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return normalize_file_roles(files)
 
 
 def main() -> None:
