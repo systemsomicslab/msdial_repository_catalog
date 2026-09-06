@@ -159,20 +159,35 @@ def msdial_catalog_get_analysis_unit(
     database: str = "",
     include_samples: bool = False,
     sample_limit: int = 0,
+    include_files: bool = False,
+    file_limit: int = 0,
 ) -> dict[str, Any]:
-    """Return one bounded MS-DIAL-compatible analysis unit and its sample-table path."""
+    """Return one bounded MS-DIAL-compatible analysis unit with its sample and file manifests.
+
+    Samples and files are both written beside the database and named by path
+    rather than inlined. A 200-file unit returned 57,647 characters, 99.6% of it
+    the file list, which no caller could receive.
+    """
     database_path = _database(database)
     with Catalog(database_path) as catalog:
         unit = catalog.get_unit(unit_id)
     samples = list(unit.get("samples", []))
-    sample_path = database_path.parent / "handoffs" / f"{unit_id}-samples.json"
-    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    files = list(unit.get("files", []))
+    handoffs = database_path.parent / "handoffs"
+    handoffs.mkdir(parents=True, exist_ok=True)
+    sample_path = handoffs / f"{unit_id}-samples.json"
+    file_path = handoffs / f"{unit_id}-files.json"
     sample_path.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    file_path.write_text(
+        json.dumps(files, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     response = dict(unit)
     response["sample_count"] = len(samples)
     response["sample_table_path"] = str(sample_path.resolve())
+    response["file_count"] = len(files)
+    response["file_manifest_path"] = str(file_path.resolve())
     if include_samples:
         limit = max(0, int(sample_limit))
         response["samples"] = samples[:limit] if limit else samples
@@ -180,6 +195,13 @@ def msdial_catalog_get_analysis_unit(
     else:
         response["samples"] = []
         response["samples_omitted"] = True
+    if include_files:
+        limit = max(0, int(file_limit))
+        response["files"] = files[:limit] if limit else files
+        response["files_truncated"] = bool(limit and len(files) > limit)
+    else:
+        response["files"] = []
+        response["files_omitted"] = True
     return response
 
 

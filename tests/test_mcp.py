@@ -125,6 +125,15 @@ class McpCatalogTests(unittest.TestCase):
                         },
                     ]
                 )
+                # The dangling keys CLAUDE-C05 recorded: a sidecar names its parent
+                # file and an auxiliary container names a derived basename, neither
+                # of which is a row in the sample table.
+                ingested_ids = {
+                    ".wiff": stem,
+                    ".wiff.scan": f"{stem}.wiff",
+                    ".wiff2": stem,
+                    ".timeseries.data": f"{stem}.timeseries",
+                }
                 for suffix in (".wiff", ".wiff.scan", ".wiff2", ".timeseries.data"):
                     files.append(
                         {
@@ -132,7 +141,7 @@ class McpCatalogTests(unittest.TestCase):
                             "size_bytes": 100,
                             "role": "raw",
                             "url": "https://example.org/bundle",
-                            "sample_id": stem,
+                            "sample_id": ingested_ids[suffix],
                         }
                     )
             project = {
@@ -177,16 +186,146 @@ class McpCatalogTests(unittest.TestCase):
             self.assertEqual(2, unit["sample_count"])
             self.assertTrue(unit["samples_omitted"])
             self.assertTrue(Path(unit["sample_table_path"]).is_file())
-            roles = {Path(item["path"]).suffix: item["role"] for item in unit["files"]}
+            self.assertTrue(unit["files_omitted"])
+            self.assertEqual([], unit["files"])
+            self.assertTrue(Path(unit["file_manifest_path"]).is_file())
+            file_rows = json.loads(
+                Path(unit["file_manifest_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(unit["file_count"], len(file_rows))
+            roles = {Path(item["path"]).suffix: item["role"] for item in file_rows}
             self.assertEqual("raw_alternate", roles[".wiff2"])
             self.assertTrue(
                 all(
                     item["role"] == "auxiliary"
-                    for item in unit["files"]
+                    for item in file_rows
                     if item["path"].endswith(".timeseries.data")
                 )
             )
+            # CLAUDE-C05: every sample_id in the manifest names a row in the sample table.
+            sample_ids = {row["sample_id"] for row in sample_rows}
+            for item in file_rows:
+                if item.get("sample_id"):
+                    self.assertIn(item["sample_id"], sample_ids, item["path"])
+                    self.assertTrue(item["sample_id_resolved"])
+                else:
+                    self.assertFalse(item["sample_id_resolved"])
+            self.assertTrue(
+                all(
+                    item.get("parent_file", "").endswith(".wiff")
+                    for item in file_rows
+                    if item["role"] in {"sidecar", "auxiliary"}
+                )
+            )
             self.assertEqual(2, search["matches"][0]["sample_count"])
+
+    def test_analysis_unit_response_stays_bounded_on_a_large_file_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            rows = []
+            files = []
+            for index in range(200):
+                stem = f"sample_{index:03d}"
+                rows.append(
+                    {"sample_id": stem, "raw_file": f"{stem}.mzML", "values": {"Group": "control"}}
+                )
+                files.append(
+                    {
+                        "name": f"FILES/a_long_repository_path_segment/{stem}.mzML",
+                        "size_bytes": 10_000,
+                        "role": "raw",
+                        "url": "https://example.org/MPST-BIG/bundle.zip",
+                        "sample_id": stem,
+                        "checksum": "0" * 64,
+                    }
+                )
+            project = {
+                "repository": "mb_post",
+                "accession": "MPST-BIG",
+                "title": "Bounded response test",
+                "analysis_units": [
+                    {
+                        "source_subrecord_id": "big",
+                        "label": "big",
+                        "separation": "LC-MS",
+                        "chromatography": "Reversed phase",
+                        "ion_mode": "Positive",
+                        "acquisition_mode": "DDA",
+                        "target_omics": "Metabolomics",
+                        "untargeted": True,
+                        "sample_metadata": rows,
+                        "files": files,
+                    }
+                ],
+            }
+            study = project_to_study(project)
+            with Catalog(database) as catalog:
+                catalog.ingest_study(study)
+            unit = msdial_catalog_get_analysis_unit(
+                study.analysis_units[0].unit_id, database=database
+            )
+
+            self.assertEqual(200, unit["file_count"])
+            self.assertEqual(200, unit["sample_count"])
+            self.assertTrue(unit["files_omitted"])
+            self.assertTrue(unit["samples_omitted"])
+            self.assertTrue(Path(unit["file_manifest_path"]).is_file())
+            self.assertTrue(Path(unit["sample_table_path"]).is_file())
+            serialized = json.dumps(unit, ensure_ascii=False)
+            self.assertLess(len(serialized), 20_000, len(serialized))
+
+    def test_files_are_returned_only_when_asked_for_and_can_be_capped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            rows = [
+                {"sample_id": f"s{index}", "raw_file": f"s{index}.mzML", "values": {"Group": "g"}}
+                for index in range(5)
+            ]
+            files = [
+                {
+                    "name": f"s{index}.mzML",
+                    "size_bytes": 10,
+                    "role": "raw",
+                    "url": "https://example.org/bundle",
+                    "sample_id": f"s{index}",
+                }
+                for index in range(5)
+            ]
+            project = {
+                "repository": "mb_post",
+                "accession": "MPST-SMALL",
+                "title": "Opt-in files",
+                "analysis_units": [
+                    {
+                        "source_subrecord_id": "small",
+                        "label": "small",
+                        "separation": "LC-MS",
+                        "chromatography": "Reversed phase",
+                        "ion_mode": "Positive",
+                        "acquisition_mode": "DDA",
+                        "target_omics": "Metabolomics",
+                        "untargeted": True,
+                        "sample_metadata": rows,
+                        "files": files,
+                    }
+                ],
+            }
+            study = project_to_study(project)
+            with Catalog(database) as catalog:
+                catalog.ingest_study(study)
+            unit_id = study.analysis_units[0].unit_id
+            full = msdial_catalog_get_analysis_unit(
+                unit_id, database=database, include_files=True
+            )
+            capped = msdial_catalog_get_analysis_unit(
+                unit_id, database=database, include_files=True, file_limit=2
+            )
+
+            self.assertEqual(5, len(full["files"]))
+            self.assertFalse(full["files_truncated"])
+            self.assertEqual(2, len(capped["files"]))
+            self.assertTrue(capped["files_truncated"])
+            self.assertEqual(5, capped["file_count"])
 
 
 if __name__ == "__main__":

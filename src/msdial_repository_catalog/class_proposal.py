@@ -239,6 +239,31 @@ def normalize_file_roles(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     for item in result:
         item["role"] = _file_role(item, known_paths)
+    # A sidecar or auxiliary container arrives carrying a sample_id derived from
+    # its own basename, which names no row in the sample table: half a manifest's
+    # rows held a dangling key, and anything joining files to samples on it either
+    # dropped those rows or re-invented the samples. Point each one at the
+    # analytical sample it belongs to, or say plainly that it belongs to none.
+    primary_by_stem: dict[str, dict[str, Any]] = {}
+    for item in result:
+        if item["role"] == "raw":
+            primary_by_stem.setdefault(
+                _primary_stem(str(item.get("path") or item.get("name") or "")), item
+            )
+    for item in result:
+        if item["role"] == "raw":
+            item["sample_id_resolved"] = True
+            continue
+        parent = primary_by_stem.get(
+            _primary_stem(str(item.get("path") or item.get("name") or ""))
+        )
+        if parent is None:
+            item["sample_id"] = ""
+            item["sample_id_resolved"] = False
+            continue
+        item["sample_id"] = str(parent.get("sample_id") or "")
+        item["parent_file"] = str(parent.get("path") or parent.get("name") or "")
+        item["sample_id_resolved"] = bool(item["sample_id"])
     return result
 
 
