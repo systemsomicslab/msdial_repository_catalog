@@ -4,8 +4,9 @@
 
 | Entity | Purpose |
 | --- | --- |
-| `study` | Repository accession, publication boundary, source payload hash |
-| `source_snapshot` | Immutable source payload versions keyed by hash and parser version |
+| `study` | Repository accession, publication boundary, current snapshot reference |
+| `source_snapshot` | Immutable retrieval/parser versions that reference a source blob |
+| `source_blob` | SHA-256-addressed gzip JSON stored once across snapshots |
 | `analysis_unit` | One technically compatible MS-DIAL run candidate |
 | `sample` | Biological or analytical sample within an analysis unit |
 | `raw_file` | Raw file, vendor directory member, or required sidecar |
@@ -50,7 +51,7 @@ the metabolite contextome:
 - Topic/archetype evidence: aging, inflammation, senescence, stress,
   development, recovery, nutrition, disease
 
-Ontology identifiers are optional in schema v1. Later vocabulary releases can
+Ontology identifiers are optional in schema v2. Later vocabulary releases can
 add ontology mappings without changing source values.
 
 ## Contextome result boundary

@@ -37,6 +37,17 @@ class FakeAdapter:
         return project(self.name, accession)
 
 
+class MultiAdapter(FakeAdapter):
+    inspected: list[str] = []
+
+    def list_accessions(self) -> list[str]:
+        return ["MPST-UPDATE-TEST", "MPST-NEW-1", "MPST-NEW-2"]
+
+    def inspect_metadata(self, accession: str) -> dict:
+        self.inspected.append(accession)
+        return project(self.name, accession)
+
+
 class UpdateJobTests(unittest.TestCase):
     def test_duplicate_sample_rows_are_merged_during_ingest(self) -> None:
         payload = project()
@@ -94,6 +105,22 @@ class UpdateJobTests(unittest.TestCase):
             BlockingAdapter.release.set()
             result = manager.wait(timeout=5)
             self.assertEqual("cancelled", result["state"])
+
+    def test_unindexed_update_filters_before_applying_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "catalog.sqlite"
+            with Catalog(database) as catalog:
+                catalog.ingest_study(project_to_study(project()))
+            MultiAdapter.inspected = []
+            manager = UpdateJobManager(database, adapter_factory=MultiAdapter)
+            manager.start(["mb_post"], mode="unindexed", limit=1)
+            result = manager.wait(timeout=5)
+            self.assertEqual("completed", result["state"])
+            self.assertEqual(["MPST-NEW-1"], MultiAdapter.inspected)
+            with Catalog(database) as catalog:
+                self.assertEqual(
+                    ["MPST-NEW-1", "MPST-UPDATE-TEST"], catalog.accessions("mb_post")
+                )
 
 
 if __name__ == "__main__":

@@ -39,12 +39,15 @@ class CatalogCrawler:
         self,
         adapter: RepositoryAdapter,
         accessions: list[str] | None = None,
+        exclude_accessions: set[str] | None = None,
         limit: int | None = None,
         progress: Callable[[dict[str, Any]], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> CrawlSummary:
         _notify(progress, {"stage": "discovering", "repository": adapter.name})
         selected = list(accessions if accessions is not None else adapter.list_accessions())
+        if exclude_accessions:
+            selected = [value for value in selected if value not in exclude_accessions]
         if limit is not None:
             selected = selected[: max(0, int(limit))]
         summary = CrawlSummary(repository=adapter.name, discovered=len(selected))
@@ -61,6 +64,8 @@ class CatalogCrawler:
                 _notify(progress, {
                     "stage": "processing", "repository": adapter.name,
                     "accession": accession, "completed": index, "total": len(selected),
+                    "hydrated": summary.hydrated, "unchanged": summary.unchanged,
+                    "failed": summary.failed,
                 })
                 try:
                     payload = adapter.inspect_metadata(accession)
@@ -71,9 +76,9 @@ class CatalogCrawler:
                         and state["parser_version"] == study.parser_version
                     ):
                         summary.unchanged += 1
-                        continue
-                    self.catalog.ingest_study(study)
-                    summary.hydrated += 1
+                    else:
+                        self.catalog.ingest_study(study)
+                        summary.hydrated += 1
                 except Exception as error:  # One broken public record must not stop a crawl.
                     summary.failed += 1
                     summary.failures.append({"accession": accession, "error": str(error)})

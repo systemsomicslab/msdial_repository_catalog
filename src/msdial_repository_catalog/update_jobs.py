@@ -25,7 +25,7 @@ class UpdateJobManager:
         database: str | Path,
         *,
         adapter_factory: Callable[[str], Any] = native_adapter,
-        crawler_version: str = "0.4.0",
+        crawler_version: str = "0.5.0",
     ) -> None:
         self.database = Path(database).expanduser().resolve()
         self.adapter_factory = adapter_factory
@@ -50,8 +50,8 @@ class UpdateJobManager:
             raise ValueError(f"Unknown repository: {', '.join(unknown)}")
         if not selected:
             raise ValueError("Select at least one repository.")
-        if mode not in {"indexed", "discover"}:
-            raise ValueError("Update mode must be 'indexed' or 'discover'.")
+        if mode not in {"indexed", "unindexed", "discover"}:
+            raise ValueError("Update mode must be 'indexed', 'unindexed', or 'discover'.")
         if limit is not None and int(limit) < 1:
             raise ValueError("Limit must be one or greater when specified.")
 
@@ -127,7 +127,9 @@ class UpdateJobManager:
                 if self._cancel.is_set():
                     break
                 with Catalog(self.database) as catalog:
-                    accessions = catalog.accessions(repository) if mode == "indexed" else None
+                    indexed_accessions = catalog.accessions(repository)
+                accessions = indexed_accessions if mode == "indexed" else None
+                excluded = set(indexed_accessions) if mode == "unindexed" else None
                 if mode == "indexed" and not accessions:
                     self._set(
                         repository=repository,
@@ -145,11 +147,13 @@ class UpdateJobManager:
                     repository=repository,
                     repository_position=position,
                     accession="",
-                    stage="discovering" if mode == "discover" else "preparing",
+                    stage="discovering" if mode in {"unindexed", "discover"} else "preparing",
                     completed=0,
                     total=len(accessions) if accessions is not None else 0,
                     message=(
-                        f"Discovering {repository} accessions..."
+                        f"Discovering unindexed {repository} accessions..."
+                        if mode == "unindexed"
+                        else f"Discovering and refreshing all {repository} accessions..."
                         if mode == "discover"
                         else f"Refreshing {len(accessions or [])} indexed {repository} accessions."
                     ),
@@ -161,6 +165,7 @@ class UpdateJobManager:
                     summary = CatalogCrawler(catalog, self.crawler_version).sync(
                         self.adapter_factory(repository),
                         accessions=accessions,
+                        exclude_accessions=excluded,
                         limit=limit,
                         progress=lambda event, p=position: self._on_progress(event, p),
                         cancel_requested=self._cancel.is_set,
@@ -216,9 +221,15 @@ class UpdateJobManager:
             stage=stage,
             completed=completed,
             total=total,
-            hydrated=self._repository_base_totals["hydrated"] + int(event.get("hydrated") or 0),
-            unchanged=self._repository_base_totals["unchanged"] + int(event.get("unchanged") or 0),
-            failed=self._repository_base_totals["failed"] + int(event.get("failed") or 0),
+            hydrated=self._repository_base_totals["hydrated"] + int(
+                event.get("hydrated", self._state.get("hydrated", 0) - self._repository_base_totals["hydrated"])
+            ),
+            unchanged=self._repository_base_totals["unchanged"] + int(
+                event.get("unchanged", self._state.get("unchanged", 0) - self._repository_base_totals["unchanged"])
+            ),
+            failed=self._repository_base_totals["failed"] + int(
+                event.get("failed", self._state.get("failed", 0) - self._repository_base_totals["failed"])
+            ),
             message=message,
         )
 

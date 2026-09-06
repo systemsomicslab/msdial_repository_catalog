@@ -10,6 +10,7 @@ from msdial_repository_catalog.mcp_server import (
     msdial_catalog_reanalysis_handoff,
     msdial_catalog_save_class_proposal,
     msdial_catalog_search,
+    msdial_catalog_storage_report,
     msdial_catalog_status,
 )
 from msdial_repository_catalog.normalize import project_to_study
@@ -29,6 +30,9 @@ class McpCatalogTests(unittest.TestCase):
 
             status = msdial_catalog_status(database)
             self.assertEqual(2, status["analysis_units"])
+            storage = msdial_catalog_storage_report(database)
+            self.assertEqual(1, storage["source_blobs"])
+            self.assertGreater(storage["source_compressed_bytes"], 0)
             result = msdial_catalog_search(
                 target_omics="Lipidomics",
                 biological_context="inflammation",

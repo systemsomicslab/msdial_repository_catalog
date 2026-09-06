@@ -70,7 +70,7 @@ def msdial_catalog_update_start(
             "confirmation_required": True,
             "message": (
                 "This contacts public repository services. Confirm the repository list and "
-                "whether the scope is indexed (bounded) or discover (potentially long)."
+                "whether the scope is indexed, unindexed-only, or discover-and-refresh-all."
             ),
             "repositories": selected,
             "mode": mode,
@@ -89,6 +89,13 @@ def msdial_catalog_update_status(database: str = "") -> dict[str, Any]:
 def msdial_catalog_update_cancel(database: str = "") -> dict[str, Any]:
     """Request cancellation after the accession currently being read finishes."""
     return _update_manager(database).cancel()
+
+
+@tool()
+def msdial_catalog_storage_report(database: str = "") -> dict[str, Any]:
+    """Report local database size and compressed source-payload storage use."""
+    with Catalog(_database(database)) as catalog:
+        return catalog.storage_report()
 
 
 @tool()

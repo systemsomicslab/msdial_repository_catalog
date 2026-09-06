@@ -41,16 +41,37 @@ class Catalog:
             current = self.connection.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
             if current is None:
                 self.connection.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
-            elif int(current["version"]) != SCHEMA_VERSION:
+            elif int(current["version"]) > SCHEMA_VERSION:
                 raise RuntimeError(
                     f"Catalog schema {current['version']} is incompatible with {SCHEMA_VERSION}."
                 )
+            elif int(current["version"]) < SCHEMA_VERSION:
+                self._migrate_schema(int(current["version"]))
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_source_snapshot_blob "
+                "ON source_snapshot(source_blob_hash)"
+            )
         try:
             with self.connection:
                 self.connection.executescript(FTS_SCHEMA)
             self.fts_enabled = True
         except sqlite3.OperationalError:
             self.fts_enabled = False
+
+    def _migrate_schema(self, version: int) -> None:
+        if version != 1:
+            raise RuntimeError(f"No catalog migration is available from schema {version}.")
+        study_columns = _columns(self.connection, "study")
+        snapshot_columns = _columns(self.connection, "source_snapshot")
+        if "current_snapshot_id" not in study_columns:
+            self.connection.execute(
+                "ALTER TABLE study ADD COLUMN current_snapshot_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "source_blob_hash" not in snapshot_columns:
+            self.connection.execute(
+                "ALTER TABLE source_snapshot ADD COLUMN source_blob_hash TEXT NOT NULL DEFAULT ''"
+            )
+        self.connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     def source_hash(self, repository: str, accession: str) -> str:
         self.initialize()
@@ -121,6 +142,7 @@ class Catalog:
             "samples": self.connection.execute("SELECT COUNT(*) FROM sample").fetchone()[0],
             "raw_files": self.connection.execute("SELECT COUNT(*) FROM raw_file").fetchone()[0],
             "class_proposals": self.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0],
+            "source_blobs": self.connection.execute("SELECT COUNT(*) FROM source_blob").fetchone()[0],
         }
 
     def overview(self) -> dict[str, Any]:
@@ -176,40 +198,48 @@ class Catalog:
     def ingest_study(self, study: StudyRecord) -> dict[str, int | str]:
         self.initialize()
         source_hash = study.source_hash()
+        source_payload_json = _json(study.source_payload)
+        snapshot_id = stable_id(study.study_id, source_hash, study.parser_version)
         with self.connection:
+            self._store_source_blob(source_hash, source_payload_json)
             self.connection.execute(
                 """
                 INSERT INTO study(
                     study_id, repository, accession, title, description, public_url, license,
                     source_hash, source_updated_at, retrieved_at, parser_version,
-                    source_payload_json, source_urls_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    current_snapshot_id, source_payload_json, source_urls_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(study_id) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
                     public_url=excluded.public_url, license=excluded.license,
                     source_hash=excluded.source_hash, source_updated_at=excluded.source_updated_at,
                     retrieved_at=excluded.retrieved_at, parser_version=excluded.parser_version,
-                    source_payload_json=excluded.source_payload_json,
+                    current_snapshot_id=excluded.current_snapshot_id,
+                    source_payload_json='',
                     source_urls_json=excluded.source_urls_json
                 """,
                 (
                     study.study_id, study.repository, study.accession, study.title,
                     study.description, study.public_url, study.license, source_hash,
                     study.source_updated_at, study.retrieved_at, study.parser_version,
-                    _json(study.source_payload), _json(study.source_urls),
+                    snapshot_id, "", _json(study.source_urls),
                 ),
             )
-            snapshot_id = stable_id(study.study_id, source_hash, study.parser_version)
             self.connection.execute(
                 """
-                INSERT OR IGNORE INTO source_snapshot(
+                INSERT INTO source_snapshot(
                     snapshot_id, study_id, source_hash, retrieved_at, parser_version,
-                    source_payload_json, source_urls_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    source_blob_hash, source_payload_json, source_urls_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_id) DO UPDATE SET
+                    retrieved_at=excluded.retrieved_at,
+                    source_blob_hash=excluded.source_blob_hash,
+                    source_payload_json='',
+                    source_urls_json=excluded.source_urls_json
                 """,
                 (
                     snapshot_id, study.study_id, source_hash, study.retrieved_at,
-                    study.parser_version, _json(study.source_payload), _json(study.source_urls),
+                    study.parser_version, source_hash, "", _json(study.source_urls),
                 ),
             )
             self.connection.execute("DELETE FROM publication WHERE study_id = ?", (study.study_id,))
@@ -249,6 +279,144 @@ class Catalog:
             "analysis_units": len(study.analysis_units),
             "samples": sample_count,
             "files": file_count,
+        }
+
+    def _store_source_blob(self, source_hash: str, payload_json: str) -> tuple[int, int]:
+        raw = payload_json.encode("utf-8")
+        compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO source_blob(
+                source_hash, encoding, payload, uncompressed_bytes, compressed_bytes, created_at
+            ) VALUES (?, 'gzip-json-v1', ?, ?, ?, ?)
+            """,
+            (
+                source_hash, compressed, len(raw), len(compressed),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return len(raw), len(compressed)
+
+    def source_payload(self, repository: str, accession: str) -> dict[str, Any]:
+        """Return the archived source payload from compact or legacy storage."""
+        self.initialize()
+        row = self.connection.execute(
+            """
+            SELECT b.encoding, b.payload, s.source_payload_json
+            FROM study s
+            LEFT JOIN source_snapshot ss ON ss.snapshot_id = s.current_snapshot_id
+            LEFT JOIN source_blob b ON b.source_hash = ss.source_blob_hash
+            WHERE s.repository = ? AND s.accession = ?
+            """,
+            (repository, accession),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown study: {repository} / {accession}")
+        if row["payload"] is not None:
+            if row["encoding"] != "gzip-json-v1":
+                raise RuntimeError(f"Unsupported source blob encoding: {row['encoding']}")
+            return json.loads(gzip.decompress(row["payload"]).decode("utf-8"))
+        legacy = str(row["source_payload_json"] or "{}").strip() or "{}"
+        return json.loads(legacy)
+
+    def compact_source_storage(
+        self, *, vacuum: bool = False, batch_size: int = 100
+    ) -> dict[str, Any]:
+        """Move legacy JSON copies into deduplicated gzip blobs.
+
+        Run this only when no catalog update is writing to the same database.
+        """
+        self.initialize()
+        active_crawls = self.connection.execute(
+            "SELECT COUNT(*) FROM crawl_run WHERE status = 'running'"
+        ).fetchone()[0]
+        if active_crawls:
+            raise RuntimeError(
+                "Source compaction is disabled while a catalog crawl is marked as running."
+            )
+        before = self.storage_report()
+        migrated = 0
+        size = max(1, int(batch_size))
+        while True:
+            rows = self.connection.execute(
+                """
+                SELECT snapshot_id, study_id, source_hash, parser_version, source_payload_json
+                FROM source_snapshot
+                WHERE source_blob_hash = '' OR source_payload_json NOT IN ('', '{}')
+                ORDER BY retrieved_at
+                LIMIT ?
+                """,
+                (size,),
+            ).fetchall()
+            if not rows:
+                break
+            with self.connection:
+                for row in rows:
+                    payload_json = str(row["source_payload_json"] or "").strip()
+                    if not payload_json:
+                        current = self.connection.execute(
+                            "SELECT source_payload_json FROM study WHERE study_id = ?",
+                            (row["study_id"],),
+                        ).fetchone()
+                        payload_json = str(current[0] or "{}").strip() if current else "{}"
+                    self._store_source_blob(str(row["source_hash"]), payload_json or "{}")
+                    self.connection.execute(
+                        "UPDATE source_snapshot SET source_blob_hash = ?, source_payload_json = '' "
+                        "WHERE snapshot_id = ?",
+                        (row["source_hash"], row["snapshot_id"]),
+                    )
+                    migrated += 1
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE study SET
+                    current_snapshot_id = COALESCE((
+                        SELECT ss.snapshot_id FROM source_snapshot ss
+                        WHERE ss.study_id = study.study_id
+                          AND ss.source_hash = study.source_hash
+                          AND ss.parser_version = study.parser_version
+                        ORDER BY ss.retrieved_at DESC LIMIT 1
+                    ), current_snapshot_id),
+                    source_payload_json = ''
+                WHERE EXISTS (
+                    SELECT 1 FROM source_snapshot ss
+                    WHERE ss.study_id = study.study_id AND ss.source_blob_hash <> ''
+                )
+                """
+            )
+            self.connection.execute("UPDATE sample SET attributes_json = '{}' ")
+        self.connection.commit()
+        if vacuum:
+            self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.connection.execute("VACUUM")
+        after = self.storage_report()
+        return {"migrated_snapshots": migrated, "vacuumed": vacuum, "before": before, "after": after}
+
+    def storage_report(self) -> dict[str, Any]:
+        self.initialize()
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS blobs,
+                   COALESCE(SUM(uncompressed_bytes), 0) AS uncompressed_bytes,
+                   COALESCE(SUM(compressed_bytes), 0) AS compressed_bytes
+            FROM source_blob
+            """
+        ).fetchone()
+        legacy = self.connection.execute(
+            """
+            SELECT
+                COALESCE((SELECT SUM(LENGTH(source_payload_json)) FROM study), 0) +
+                COALESCE((SELECT SUM(LENGTH(source_payload_json)) FROM source_snapshot), 0) +
+                COALESCE((SELECT SUM(LENGTH(attributes_json)) FROM sample), 0)
+            """
+        ).fetchone()[0]
+        return {
+            "database": str(self.path),
+            "database_bytes": self.path.stat().st_size if self.path.exists() else 0,
+            "source_blobs": int(row["blobs"]),
+            "source_uncompressed_bytes": int(row["uncompressed_bytes"]),
+            "source_compressed_bytes": int(row["compressed_bytes"]),
+            "legacy_json_bytes": int(legacy),
         }
 
     def _ingest_unit(self, study_id: str, unit: Any) -> None:
@@ -305,7 +473,7 @@ class Catalog:
                 "INSERT INTO sample VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     sample_pk, unit.unit_id, sample.sample_id, sample.source_name,
-                    sample.raw_file, _json(sample.attributes),
+                    sample.raw_file, "{}",
                 ),
             )
             for field_name, raw_value in sample.attributes.items():
@@ -439,7 +607,16 @@ class Catalog:
             "SELECT * FROM sample WHERE unit_id = ? ORDER BY sample_id, raw_file", (unit_id,)
         ):
             item = dict(sample)
-            item["attributes"] = json.loads(item.pop("attributes_json"))
+            legacy_attributes = json.loads(item.pop("attributes_json") or "{}")
+            normalized_attributes = {
+                str(row["field_name"]): str(row["raw_value"])
+                for row in self.connection.execute(
+                    "SELECT field_name, raw_value FROM sample_attribute "
+                    "WHERE sample_pk = ? ORDER BY field_name",
+                    (item["sample_pk"],),
+                )
+            }
+            item["attributes"] = normalized_attributes or legacy_attributes
             item["contexts"] = [
                 dict(row)
                 for row in self.connection.execute(
@@ -527,8 +704,15 @@ class Catalog:
         return result
 
     def snapshot(
-        self, destination: str | Path, include_local_decisions: bool = False
+        self,
+        destination: str | Path,
+        include_local_decisions: bool = False,
+        *,
+        profile: str = "full",
+        repository: str = "",
     ) -> dict[str, Any]:
+        if profile not in {"full", "thin"}:
+            raise ValueError("Snapshot profile must be 'full' or 'thin'.")
         self.connection.commit()
         destination = Path(destination).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -539,17 +723,35 @@ class Catalog:
                 self.connection.backup(target)
             finally:
                 target.close()
-            if not include_local_decisions:
-                target = sqlite3.connect(compact)
-                try:
-                    target.execute("PRAGMA foreign_keys = ON")
+            target = sqlite3.connect(compact)
+            try:
+                target.execute("PRAGMA foreign_keys = ON")
+                if repository:
+                    target.execute("DELETE FROM study WHERE repository <> ?", (repository,))
+                    target.execute("DELETE FROM crawl_run WHERE repository <> ?", (repository,))
+                    try:
+                        target.execute(
+                            "DELETE FROM study_fts WHERE study_id NOT IN (SELECT study_id FROM study)"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if profile == "thin":
+                    target.execute("DELETE FROM source_blob")
+                    target.execute("UPDATE source_snapshot SET source_blob_hash = '', source_payload_json = ''")
+                    target.execute("UPDATE study SET source_payload_json = ''")
+                    target.execute("UPDATE sample SET attributes_json = '{}'")
+                if not include_local_decisions:
                     target.execute("DELETE FROM class_assignment")
                     target.execute("DELETE FROM class_proposal")
                     target.execute("DELETE FROM manual_override")
-                    target.commit()
-                    target.execute("VACUUM")
-                finally:
-                    target.close()
+                target.commit()
+                target.execute("VACUUM")
+                study_count = target.execute("SELECT COUNT(*) FROM study").fetchone()[0]
+                analysis_unit_count = target.execute(
+                    "SELECT COUNT(*) FROM analysis_unit"
+                ).fetchone()[0]
+            finally:
+                target.close()
             with compact.open("rb") as source, gzip.open(destination, "wb", compresslevel=9) as output:
                 shutil.copyfileobj(source, output)
         sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
@@ -559,18 +761,63 @@ class Catalog:
             "asset": destination.name,
             "size_bytes": destination.stat().st_size,
             "sha256": sha256,
-            "study_count": self.connection.execute("SELECT COUNT(*) FROM study").fetchone()[0],
-            "analysis_unit_count": self.connection.execute("SELECT COUNT(*) FROM analysis_unit").fetchone()[0],
+            "study_count": study_count,
+            "analysis_unit_count": analysis_unit_count,
             "includes_local_decisions": include_local_decisions,
+            "profile": profile,
+            "repository": repository or "all",
         }
         manifest_path = destination.with_suffix(destination.suffix + ".manifest.json")
         manifest_path.write_text(_json(manifest, indent=2), encoding="utf-8")
         manifest["manifest_path"] = str(manifest_path)
         return manifest
 
+    def release_bundle(
+        self, output_directory: str | Path, *, include_provenance: bool = False
+    ) -> dict[str, Any]:
+        """Create repository-sharded thin assets plus an aggregate release manifest."""
+        self.initialize()
+        output = Path(output_directory).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        repositories = [
+            str(row[0])
+            for row in self.connection.execute(
+                "SELECT DISTINCT repository FROM study ORDER BY repository"
+            )
+        ]
+        assets: list[dict[str, Any]] = []
+        for repository in repositories:
+            thin = output / f"catalog-{repository}-thin-v{SCHEMA_VERSION}.sqlite.gz"
+            assets.append(
+                self.snapshot(thin, profile="thin", repository=repository)
+            )
+            if include_provenance:
+                full = output / f"catalog-{repository}-provenance-v{SCHEMA_VERSION}.sqlite.gz"
+                assets.append(
+                    self.snapshot(full, profile="full", repository=repository)
+                )
+        manifest = {
+            "format": "msdial-repository-catalog-release.v1",
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_database": str(self.path),
+            "repositories": repositories,
+            "assets": [
+                {key: value for key, value in asset.items() if key != "manifest_path"}
+                for asset in assets
+            ],
+        }
+        manifest_path = output / "catalog-release-manifest.json"
+        manifest_path.write_text(_json(manifest, indent=2), encoding="utf-8")
+        return {**manifest, "manifest_path": str(manifest_path)}
+
 
 def _json(value: Any, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=indent)
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
 def _deduplicate_samples(samples: list[Any]) -> list[Any]:

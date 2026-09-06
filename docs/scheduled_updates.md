@@ -8,9 +8,12 @@ data are never downloaded by this operation.
 
 - `indexed`: refresh only accessions already stored locally. Use this for routine
   bounded updates.
-- `discover`: retrieve each repository's current accession index, then fetch the
-  selected records. Use this periodically to add new studies. A full run can
-  take hours and depends on the availability of external services.
+- `unindexed`: retrieve the current accession index, subtract accessions already
+  stored locally, then apply `--limit`. Use repeated bounded runs to grow a
+  catalog without re-reading earlier records.
+- `discover`: retrieve the current accession index, then fetch every selected
+  record, including indexed accessions. Use this for a full refresh. A full run
+  can take hours and depends on external services.
 
 Run all sources from a terminal:
 
@@ -18,7 +21,14 @@ Run all sources from a terminal:
 msdial-repository-catalog --database D:\MSDIAL_Catalog\catalog.sqlite update --mode indexed
 ```
 
-Run discovery for selected sources or a bounded test:
+Grow the catalog in repeatable batches:
+
+```powershell
+msdial-repository-catalog --database D:\MSDIAL_Catalog\catalog.sqlite update `
+  --mode unindexed --repository metabolomics_workbench --limit 100
+```
+
+Run a full refresh for selected sources or a bounded test:
 
 ```powershell
 msdial-repository-catalog --database D:\MSDIAL_Catalog\catalog.sqlite update `
@@ -38,8 +48,8 @@ repository, and use arguments such as:
 -m msdial_repository_catalog.cli --database D:\MSDIAL_Catalog\catalog.sqlite update --mode indexed
 ```
 
-A practical cadence is a frequent indexed refresh and a less frequent discovery
-run. Do not schedule overlapping tasks; the GUI/MCP process prevents overlap
+A practical cadence is a frequent indexed refresh, regular unindexed-only
+growth, and a less frequent full discovery run. Do not schedule overlapping tasks; the GUI/MCP process prevents overlap
 inside one process, while separate operating-system processes cannot coordinate.
 
 ## macOS and Linux cron
