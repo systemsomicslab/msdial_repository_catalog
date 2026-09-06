@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .class_proposal import build_class_proposal_request, validate_class_proposal
 from .models import ClassAssignment, ClassProposal, stable_id
 from .storage import Catalog
+from .update_jobs import REPOSITORIES, UpdateJobManager
 
 
 DEFAULT_DATABASE = Path(
@@ -26,6 +28,8 @@ except ImportError:
     mcp = None
 
 F = TypeVar("F", bound=Callable[..., Any])
+_UPDATE_MANAGERS: dict[Path, UpdateJobManager] = {}
+_UPDATE_MANAGERS_LOCK = threading.Lock()
 
 
 def tool() -> Callable[[F], F]:
@@ -38,11 +42,53 @@ def _database(value: str = "") -> Path:
     return Path(value).expanduser().resolve() if value.strip() else DEFAULT_DATABASE.resolve()
 
 
+def _update_manager(database: str = "") -> UpdateJobManager:
+    path = _database(database)
+    with _UPDATE_MANAGERS_LOCK:
+        return _UPDATE_MANAGERS.setdefault(path, UpdateJobManager(path))
+
+
 @tool()
 def msdial_catalog_status(database: str = "") -> dict[str, Any]:
     """Report the local catalog path, schema, and indexed record counts."""
     with Catalog(_database(database)) as catalog:
         return catalog.stats()
+
+
+@tool()
+def msdial_catalog_update_start(
+    repositories: list[str] | None = None,
+    mode: str = "indexed",
+    limit: int | None = None,
+    confirmed: bool = False,
+    database: str = "",
+) -> dict[str, Any]:
+    """Start a metadata-only catalog update; public repository services are contacted."""
+    selected = repositories or list(REPOSITORIES)
+    if not confirmed:
+        return {
+            "confirmation_required": True,
+            "message": (
+                "This contacts public repository services. Confirm the repository list and "
+                "whether the scope is indexed (bounded) or discover (potentially long)."
+            ),
+            "repositories": selected,
+            "mode": mode,
+            "limit": limit,
+        }
+    return _update_manager(database).start(selected, mode=mode, limit=limit)
+
+
+@tool()
+def msdial_catalog_update_status(database: str = "") -> dict[str, Any]:
+    """Report progress, elapsed time, ETA, and outcomes for the current update job."""
+    return _update_manager(database).status()
+
+
+@tool()
+def msdial_catalog_update_cancel(database: str = "") -> dict[str, Any]:
+    """Request cancellation after the accession currently being read finishes."""
+    return _update_manager(database).cancel()
 
 
 @tool()

@@ -9,6 +9,7 @@ from .class_proposal import build_class_proposal_request, field_based_proposal
 from .crawler import CatalogCrawler
 from .normalize import project_to_study
 from .storage import Catalog
+from .update_jobs import REPOSITORIES, UpdateJobManager
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +42,16 @@ def main(argv: list[str] | None = None) -> int:
     native.add_argument("--accession", action="append")
     native.add_argument("--limit", type=int)
 
+    update = commands.add_parser(
+        "update", help="Refresh indexed metadata or discover and crawl current repository records"
+    )
+    update.add_argument(
+        "--repository", action="append", choices=list(REPOSITORIES),
+        help="Repository to update; repeat as needed. Defaults to all repositories.",
+    )
+    update.add_argument("--mode", choices=["indexed", "discover"], default="indexed")
+    update.add_argument("--limit", type=int)
+
     search = commands.add_parser("search", help="Search local analysis units")
     for name in (
         "text", "repository", "separation", "chromatography", "ion-mode",
@@ -67,6 +78,13 @@ def main(argv: list[str] | None = None) -> int:
     snapshot.add_argument("--include-local-decisions", action="store_true")
 
     args = parser.parse_args(argv)
+    if args.command == "update":
+        manager = UpdateJobManager(args.database)
+        manager.start(args.repository, mode=args.mode, limit=args.limit)
+        result = manager.wait()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1 if result["state"] in {"failed", "completed_with_errors"} else 0
+
     with Catalog(args.database) as catalog:
         catalog.initialize()
         if args.command == "init":

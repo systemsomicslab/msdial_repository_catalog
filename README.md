@@ -73,15 +73,22 @@ python -m msdial_repository_catalog.gui_server `
   --database catalog-data/catalog.sqlite
 ```
 
-The browser opens at `http://127.0.0.1:8770/`. The GUI reads the local SQLite
-catalog only. It does not contact a public repository, download raw data, or use
-an LLM during search. It provides:
+The browser opens at `http://127.0.0.1:8770/`. Search reads the local SQLite
+catalog only and does not use an LLM. The catalog-maintenance panel can contact
+public repository metadata services when the user explicitly starts an update;
+it never downloads mass-spectrometry raw data. The GUI provides:
 
 - catalog and repository coverage summaries;
 - combined technical and biological-context filters;
 - Analysis Unit results rather than accession-only results;
 - review warnings and repository provenance;
 - sample metadata and raw-file manifest previews.
+- bounded indexed updates and full discovery crawls with progress, ETA, and cancellation.
+
+The routine `Refresh indexed accessions` scope re-fetches only studies already
+present in the local catalog. `Discover new and refresh all` first obtains the
+current public accession index and can therefore take hours for a large source.
+Only one update runs at a time, and repositories are processed sequentially.
 
 Use `--no-browser` when starting it from an agent or service, and set a different
 port with `--port`. The default database is
@@ -121,6 +128,11 @@ msdial-repository-catalog-mcp
 The catalog MCP searches local metadata and creates an analysis-unit handoff.
 MS-DIAL Interactive remains responsible for confirmed raw-data download and
 analysis execution.
+
+Agents can also start, observe, and cancel catalog metadata updates with
+`msdial_catalog_update_start`, `msdial_catalog_update_status`, and
+`msdial_catalog_update_cancel`. Starting requires explicit confirmation because
+it contacts public services. See [Scheduled updates](docs/scheduled_updates.md).
 
 ## Repository adapters
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import json
@@ -91,11 +92,23 @@ class Catalog:
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
-                    "completed_with_errors" if summary.failed else "completed",
+                    (
+                        "cancelled" if getattr(summary, "cancelled", False)
+                        else "completed_with_errors" if summary.failed else "completed"
+                    ),
                     summary.hydrated, summary.unchanged, summary.failed,
                     _json({"failures": summary.failures}), crawl_run_id,
                 ),
             )
+
+    def accessions(self, repository: str) -> list[str]:
+        """Return the locally indexed accessions for a repository."""
+        self.initialize()
+        rows = self.connection.execute(
+            "SELECT accession FROM study WHERE repository = ? ORDER BY accession COLLATE NOCASE",
+            (repository,),
+        ).fetchall()
+        return [str(row["accession"]) for row in rows]
 
     def stats(self) -> dict[str, Any]:
         self.initialize()
@@ -286,7 +299,7 @@ class Catalog:
                     evidence.confidence if evidence else 0.6, evidence.note if evidence else "",
                 ),
             )
-        for position, sample in enumerate(unit.samples):
+        for position, sample in enumerate(_deduplicate_samples(unit.samples)):
             sample_pk = stable_id(unit.unit_id, sample.sample_id, sample.raw_file, position)
             self.connection.execute(
                 "INSERT INTO sample VALUES (?, ?, ?, ?, ?, ?)",
@@ -558,6 +571,35 @@ class Catalog:
 
 def _json(value: Any, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=indent)
+
+
+def _deduplicate_samples(samples: list[Any]) -> list[Any]:
+    """Merge repeated repository rows that identify the same sample and raw file."""
+    result: list[Any] = []
+    by_key: dict[tuple[str, str], Any] = {}
+    context_keys: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
+    for sample in samples:
+        key = (str(sample.sample_id).strip(), str(sample.raw_file).strip())
+        if key not in by_key:
+            merged = copy.deepcopy(sample)
+            by_key[key] = merged
+            result.append(merged)
+            context_keys[key] = {
+                (item.category, item.value, item.normalized_value) for item in merged.contexts
+            }
+            continue
+        merged = by_key[key]
+        if not merged.source_name and sample.source_name:
+            merged.source_name = sample.source_name
+        for field_name, value in sample.attributes.items():
+            if field_name not in merged.attributes or not normalize_value(merged.attributes[field_name]):
+                merged.attributes[field_name] = value
+        for assertion in sample.contexts:
+            context_key = (assertion.category, assertion.value, assertion.normalized_value)
+            if context_key not in context_keys[key]:
+                merged.contexts.append(copy.deepcopy(assertion))
+                context_keys[key].add(context_key)
+    return result
 
 
 def _db_bool(value: bool | None) -> int | None:
