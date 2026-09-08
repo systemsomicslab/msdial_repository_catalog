@@ -9,6 +9,7 @@ from .class_proposal import build_class_proposal_request, field_based_proposal
 from .crawler import CatalogCrawler
 from .normalize import project_to_study
 from .storage import Catalog
+from .schema import SCHEMA_VERSION
 from .update_jobs import REPOSITORIES, UpdateJobManager
 
 
@@ -49,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         "--repository", action="append", choices=list(REPOSITORIES),
         help="Repository to update; repeat as needed. Defaults to all repositories.",
     )
-    update.add_argument("--mode", choices=["indexed", "discover"], default="indexed")
+    update.add_argument(
+        "--mode", choices=["indexed", "unindexed", "discover"], default="indexed"
+    )
     update.add_argument("--limit", type=int)
 
     search = commands.add_parser("search", help="Search local analysis units")
@@ -76,6 +79,22 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = commands.add_parser("snapshot", help="Create a compressed release snapshot and manifest")
     snapshot.add_argument("output")
     snapshot.add_argument("--include-local-decisions", action="store_true")
+    snapshot.add_argument("--profile", choices=["full", "thin"], default="thin")
+    snapshot.add_argument("--repository", choices=list(REPOSITORIES), default="")
+
+    compact = commands.add_parser(
+        "compact-storage", help="Migrate legacy JSON copies into deduplicated compressed blobs"
+    )
+    compact.add_argument("--vacuum", action="store_true")
+    compact.add_argument("--batch-size", type=int, default=100)
+
+    commands.add_parser("storage-report", help="Report database and source-payload storage sizes")
+
+    release = commands.add_parser(
+        "release-bundle", help="Create repository-sharded thin catalog assets and a manifest"
+    )
+    release.add_argument("output_directory")
+    release.add_argument("--include-provenance", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "update":
@@ -88,7 +107,9 @@ def main(argv: list[str] | None = None) -> int:
     with Catalog(args.database) as catalog:
         catalog.initialize()
         if args.command == "init":
-            result: Any = {"database": str(catalog.path), "schema": 1, "fts": catalog.fts_enabled}
+            result: Any = {
+                "database": str(catalog.path), "schema": SCHEMA_VERSION, "fts": catalog.fts_enabled
+            }
         elif args.command == "ingest-json":
             result = []
             for value in args.paths:
@@ -154,7 +175,22 @@ def main(argv: list[str] | None = None) -> int:
             catalog.save_class_proposal(proposal_value)
             result = proposal_value.as_dict()
         elif args.command == "snapshot":
-            result = catalog.snapshot(args.output, args.include_local_decisions)
+            result = catalog.snapshot(
+                args.output,
+                args.include_local_decisions,
+                profile=args.profile,
+                repository=args.repository,
+            )
+        elif args.command == "compact-storage":
+            result = catalog.compact_source_storage(
+                vacuum=args.vacuum, batch_size=args.batch_size
+            )
+        elif args.command == "storage-report":
+            result = catalog.storage_report()
+        elif args.command == "release-bundle":
+            result = catalog.release_bundle(
+                args.output_directory, include_provenance=args.include_provenance
+            )
         else:
             parser.error(f"Unknown command: {args.command}")
             return 2

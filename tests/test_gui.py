@@ -76,6 +76,11 @@ class GuiApplicationTests(unittest.TestCase):
                 with urllib.request.urlopen(root + "/", timeout=5) as response:
                     page = response.read().decode("utf-8")
                 self.assertIn("MS-DIAL Repository Catalog", page)
+                self.assertIn('value="unindexed"', page)
+                with urllib.request.urlopen(root + "/api/health", timeout=5) as response:
+                    health = json.load(response)
+                self.assertEqual("ok", health["status"])
+                self.assertEqual(str(database.resolve()), health["database"])
                 with urllib.request.urlopen(root + "/api/status", timeout=5) as response:
                     status = json.load(response)
                 self.assertEqual(1, status["analysis_units"])

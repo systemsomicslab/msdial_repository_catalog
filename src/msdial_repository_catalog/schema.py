@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 BASE_SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS study (
     source_updated_at TEXT NOT NULL DEFAULT '',
     retrieved_at TEXT NOT NULL DEFAULT '',
     parser_version TEXT NOT NULL DEFAULT '',
+    current_snapshot_id TEXT NOT NULL DEFAULT '',
     source_payload_json TEXT NOT NULL DEFAULT '{}',
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(repository, accession)
@@ -44,9 +45,19 @@ CREATE TABLE IF NOT EXISTS source_snapshot (
     source_hash TEXT NOT NULL,
     retrieved_at TEXT NOT NULL,
     parser_version TEXT NOT NULL DEFAULT '',
+    source_blob_hash TEXT NOT NULL DEFAULT '',
     source_payload_json TEXT NOT NULL DEFAULT '{}',
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(study_id, source_hash, parser_version)
+);
+
+CREATE TABLE IF NOT EXISTS source_blob (
+    source_hash TEXT PRIMARY KEY,
+    encoding TEXT NOT NULL DEFAULT 'gzip-json-v1',
+    payload BLOB NOT NULL,
+    uncompressed_bytes INTEGER NOT NULL,
+    compressed_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS publication (
@@ -264,6 +275,12 @@ CREATE INDEX IF NOT EXISTS idx_unit_filter ON analysis_unit(
     separation, chromatography, acquisition_mode, ion_mode, target_omics, review_status
 );
 CREATE INDEX IF NOT EXISTS idx_sample_unit ON sample(unit_id);
+CREATE INDEX IF NOT EXISTS idx_raw_file_unit ON raw_file(unit_id);
+CREATE INDEX IF NOT EXISTS idx_raw_file_download_url ON raw_file(download_url);
+CREATE INDEX IF NOT EXISTS idx_sample_attribute_sample ON sample_attribute(sample_pk);
+CREATE INDEX IF NOT EXISTS idx_sample_context_sample ON sample_context(sample_pk);
+CREATE INDEX IF NOT EXISTS idx_unit_context_unit ON analysis_unit_context(unit_id);
+CREATE INDEX IF NOT EXISTS idx_publication_study ON publication(study_id);
 CREATE INDEX IF NOT EXISTS idx_attribute_field ON sample_attribute(normalized_field, normalized_value);
 CREATE INDEX IF NOT EXISTS idx_context_category ON sample_context(category, normalized_value);
 CREATE INDEX IF NOT EXISTS idx_unit_context_category ON analysis_unit_context(category, normalized_value);
