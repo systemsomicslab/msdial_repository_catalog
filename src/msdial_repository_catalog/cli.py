@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .class_proposal import build_class_proposal_request, field_based_proposal
+from .class_selection import select_class_fields
 from .crawler import CatalogCrawler
 from .normalize import project_to_study
 from .storage import Catalog
@@ -70,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
     request = commands.add_parser("class-request", help="Create an agent-readable Class proposal request")
     request.add_argument("unit_id")
     request.add_argument("--purpose", required=True)
+
+    selection = commands.add_parser(
+        "class-selection",
+        help="Report which declared experimental factor would define Class, or why none does",
+    )
+    selection.add_argument("unit_id")
+    selection.add_argument("--purpose", default="")
 
     proposal = commands.add_parser("propose-fields", help="Create and save a deterministic Class proposal")
     proposal.add_argument("unit_id")
@@ -168,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             result = catalog.get_unit(args.unit_id)
         elif args.command == "class-request":
             result = build_class_proposal_request(catalog.get_unit(args.unit_id), args.purpose)
+        elif args.command == "class-selection":
+            result = select_class_fields(catalog.get_unit(args.unit_id), args.purpose)
         elif args.command == "propose-fields":
             proposal_value = field_based_proposal(
                 catalog.get_unit(args.unit_id), args.purpose, list(args.field)
