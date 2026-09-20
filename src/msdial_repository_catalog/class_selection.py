@@ -57,6 +57,12 @@ _NUISANCE_TOKENS: tuple[str, ...] = (
     "file", "filename", "raw file", "derivatization",
     "spectrum type", "scan polarity", "ion mode", "polarity", "instrument",
     "column", "chromatography", "ionization", "mass analyzer",
+    # Found in MetaboLights MTBLS1572, which declares Factor Value[Data acquisition mode] with
+    # the levels DDA, DIA and Full-scan. Grouping by it would report the acquisition method as
+    # the biology, and the unit itself needs splitting because the campaign accepts one
+    # acquisition mode per run.
+    "acquisition", "acquisition mode", "data acquisition", "scan mode", "scan type",
+    "ms level", "collision", "collision energy", "fragmentation", "mass range", "analytical condition",
 )
 
 # Declared, and a contrast only when nothing better was declared. The project contract asks

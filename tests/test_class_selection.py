@@ -117,6 +117,23 @@ class ADeclarationIsNotEnoughByItself(unittest.TestCase):
             unit = _unit(_repeat(f"Factor Value[{name}]", ["a", "b"], times=4))
             self.assertEqual("abstained", select_class_fields(unit, "")["decision"], name)
 
+    def test_an_analytical_method_declared_as_a_factor_is_still_analytical(self) -> None:
+        """Found in MetaboLights MTBLS1572, surveying the campaign-eligible pool.
+
+        That study declares Factor Value[Data acquisition mode] with the levels DDA, DIA and
+        Full-scan, seven files each. It is a genuine declaration and a genuine comparison -
+        the study compares acquisition methods - but it is a comparison of instruments, not
+        of biology, and a run grouped by it reports the method as the finding. The unit also
+        has to be split before it can run at all, because the campaign accepts one acquisition
+        mode per MS-DIAL run.
+        """
+        unit = _unit(_repeat("Factor Value[Data acquisition mode]", ["DDA", "DIA", "Full-scan"], times=7))
+
+        decision = select_class_fields(unit, "")
+
+        self.assertEqual("abstained", decision["decision"])
+        self.assertEqual("nuisance", decision["considered"][0]["verdict"])
+
     def test_a_single_level_column_defines_no_comparison(self) -> None:
         unit = _unit(_repeat("Factor Value[Treatment]", ["control"], times=8))
 
