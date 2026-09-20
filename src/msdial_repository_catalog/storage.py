@@ -708,10 +708,39 @@ class Catalog:
         if not values:
             return {"bundle_bytes": 0, "bundle_shared_unit_count": 0, "urls": []}
         placeholders = ",".join("?" for _ in values)
+        # ONE CONTRIBUTION PER DISTINCT FILE, NOT PER ROW.
+        #
+        # raw_file holds one row per (unit, file), so a download_url that several analysis units
+        # share produced one row per unit and SUM(size_bytes) multiplied the archive by the number
+        # of units. Measured against the index: ST004151_Rawfiles.zip is 38.0 GB and was reported as
+        # 380.1 GB across its ten units; ST002965_Rawdata.zip is 54.0 GB and was reported as
+        # 216.0 GB across four. 5,355 download URLs are shared by more than one unit.
+        #
+        # The project contract names this figure "the download approval and safety-limit quantity",
+        # so the number a person is asked to approve was an order of magnitude too large for the
+        # majority of candidates -- which rejects units that would have fitted, and teaches whoever
+        # reads it that the figure cannot be trusted.
+        #
+        # SUM is right for one shape and wrong for the other, and `path` is what tells them apart.
+        # A MetaboBank download_url is a per-file endpoint: MPST000003.0 carries 120 rows with 120
+        # distinct paths and 120 different sizes, all genuinely downloaded. A Metabolomics Workbench
+        # download_url is one archive: ST004151_Rawfiles.zip carries 10 rows with ONE distinct path
+        # and one repeated size, downloaded once. Grouping by path first counts each file once in
+        # both shapes; MAX would have been correct for the archive and would have reported one file
+        # of a hundred and twenty for the endpoint.
         rows = self.connection.execute(
-            f"SELECT download_url, SUM(size_bytes) AS bundle_bytes, "
-            f"COUNT(DISTINCT unit_id) AS unit_count FROM raw_file "
-            f"WHERE download_url IN ({placeholders}) GROUP BY download_url",
+            f"""
+            SELECT r.download_url,
+                   (SELECT COALESCE(SUM(f.file_bytes), 0)
+                      FROM (SELECT path, MAX(size_bytes) AS file_bytes
+                              FROM raw_file
+                             WHERE download_url = r.download_url
+                             GROUP BY path) f) AS bundle_bytes,
+                   COUNT(DISTINCT r.unit_id) AS unit_count
+              FROM raw_file r
+             WHERE r.download_url IN ({placeholders})
+             GROUP BY r.download_url
+            """,
             values,
         ).fetchall()
         return {
