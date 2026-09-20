@@ -109,12 +109,29 @@ class SavingItStillNeedsTheConfirmation(unittest.TestCase):
                 stored = catalog.get_class_proposal(saved["proposal"]["proposal_id"])
 
         self.assertTrue(saved["saved"])
+        self.assertEqual(
+            "accepted", stored["status"],
+            "the confirmation is what makes it accepted, and it must be readable afterwards",
+        )
         self.assertEqual(["Factor Value[Treatment]"], stored["selected_fields"])
         self.assertIn("without a person reading the study", stored["warnings"][0])
         self.assertEqual("catalog-declared-factor-selection", stored["model"])
         self.assertEqual(
             {"LPS", "vehicle"}, {item["class_label"] for item in stored["assignments"]}
         )
+
+    def test_a_preview_leaves_the_proposal_unaccepted(self) -> None:
+        """The status must record the confirmation, not the act of looking at the proposal."""
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(_declared_project(), database)
+
+            preview = msdial_catalog_save_class_proposal(
+                unit_id, "Compare LPS against vehicle", [], "", "", database=database
+            )
+
+        self.assertTrue(preview["confirmation_required"])
+        self.assertNotIn("proposal", preview, "nothing was saved, so nothing was accepted")
 
     def test_an_abstention_saves_nothing_and_returns_the_reason(self) -> None:
         """Confirming does not turn an abstention into a guess."""

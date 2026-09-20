@@ -15,10 +15,18 @@ from .class_proposal import (
     validate_class_proposal,
 )
 from .class_selection import automatic_class_proposal, select_class_fields
+
 from .models import ClassAssignment, ClassProposal, stable_id
 from .storage import Catalog
 from .update_jobs import REPOSITORIES, UpdateJobManager
 
+
+# A proposal reaches this module reading "proposed", which is what ClassProposal is born as.
+# Saving is gated on an explicit confirmation, and that confirmation was the only record that
+# anyone had agreed to the grouping -- it lived in a conversation and in nothing an audit could
+# read. A machine-authored grouping executed and published beside a proposal still reading
+# "proposed" is the whole of the safety argument missing.
+ACCEPTED_STATUS = "accepted"
 
 DEFAULT_DATABASE = Path(
     os.environ.get(
@@ -328,6 +336,7 @@ def msdial_catalog_save_class_proposal(
                     else "Review the deterministic field projection before saving it."
                 ),
             }
+        proposal.status = ACCEPTED_STATUS
         with Catalog(_database(database)) as catalog:
             catalog.save_class_proposal(proposal)
         return {"saved": True, "proposal": proposal.as_dict()}
@@ -367,6 +376,7 @@ def msdial_catalog_save_class_proposal(
         model=model,
         prompt_hash=hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
     )
+    proposal.status = ACCEPTED_STATUS
     with Catalog(_database(database)) as catalog:
         validate_class_proposal(unit, proposal)
         catalog.save_class_proposal(proposal)
