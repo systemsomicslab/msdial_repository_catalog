@@ -14,10 +14,19 @@ from .class_proposal import (
     normalize_file_roles,
     validate_class_proposal,
 )
+from .class_selection import automatic_class_proposal, select_class_fields
+
 from .models import ClassAssignment, ClassProposal, stable_id
 from .storage import Catalog
 from .update_jobs import REPOSITORIES, UpdateJobManager
 
+
+# A proposal reaches this module reading "proposed", which is what ClassProposal is born as.
+# Saving is gated on an explicit confirmation, and that confirmation was the only record that
+# anyone had agreed to the grouping -- it lived in a conversation and in nothing an audit could
+# read. A machine-authored grouping executed and published beside a proposal still reading
+# "proposed" is the whole of the safety argument missing.
+ACCEPTED_STATUS = "accepted"
 
 DEFAULT_DATABASE = Path(
     os.environ.get(
@@ -235,6 +244,31 @@ def msdial_catalog_class_request(
 
 
 @tool()
+def msdial_catalog_class_selection(
+    unit_id: str,
+    purpose: str = "",
+    database: str = "",
+) -> dict[str, Any]:
+    """Report which declared experimental factor would define Class for a unit, or why none does.
+
+    Read-only: it saves nothing. An agent reanalysing a whole repository cannot ask anyone
+    which column is the design, so this chooses only among the columns a submitter declared
+    as experimental factors and abstains rather than guessing from the other metadata. The
+    returned record names what was adopted, what was refused and on what measurement.
+    """
+    with Catalog(_database(database)) as catalog:
+        unit = catalog.get_unit(unit_id)
+    proposal, decision = automatic_class_proposal(unit, purpose)
+    if proposal is not None:
+        counts: dict[str, int] = {}
+        for item in proposal.assignments:
+            counts[item.class_label] = counts.get(item.class_label, 0) + 1
+        decision["class_counts"] = dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+        decision["assignment_count"] = len(proposal.assignments)
+    return decision
+
+
+@tool()
 def msdial_catalog_save_class_proposal(
     unit_id: str,
     purpose: str,
@@ -246,15 +280,40 @@ def msdial_catalog_save_class_proposal(
     confirmed: bool = False,
     database: str = "",
 ) -> dict[str, Any]:
-    """Validate and save an agent Class proposal only after explicit user confirmation."""
+    """Validate and save an agent Class proposal only after explicit user confirmation.
+
+    Leaving `selected_fields` empty and `assignments_json` empty asks the catalog to choose
+    from the columns the submitter declared as experimental factors, which is what an agent
+    reanalysing a whole repository has to do; it abstains rather than guessing when nothing
+    was declared. The confirmation is required either way.
+    """
     assignments_payload = json.loads(assignments_json) if assignments_json.strip() else []
     contrast = json.loads(contrast_definition_json or "{}")
     with Catalog(_database(database)) as catalog:
         unit = catalog.get_unit(unit_id)
     if not assignments_payload:
-        proposal = field_based_proposal(unit, purpose, selected_fields, rationale)
-        proposal.contrast_definition = contrast
-        proposal.model = model or proposal.model
+        decision: dict[str, Any] | None = None
+        if selected_fields:
+            proposal = field_based_proposal(unit, purpose, selected_fields, rationale)
+            proposal.contrast_definition = contrast
+            proposal.model = model or proposal.model
+        else:
+            # No fields named: choose from the declared experimental factors. The choice is
+            # still only a proposal, and saving it still needs the same confirmation.
+            selected, decision = automatic_class_proposal(unit, purpose)
+            if selected is None:
+                return {
+                    "saved": False,
+                    "class_selection": decision,
+                    "message": decision["notice"],
+                }
+            proposal = selected
+            if contrast:
+                proposal.contrast_definition = contrast
+            if model and model != "agent":
+                proposal.model = model
+            if rationale.strip():
+                proposal.rationale = rationale
         if not confirmed:
             counts: dict[str, int] = {}
             for item in proposal.assignments:
@@ -263,14 +322,21 @@ def msdial_catalog_save_class_proposal(
                 "confirmation_required": True,
                 "proposal_preview": {
                     "unit_id": unit_id,
-                    "selected_fields": selected_fields,
+                    "selected_fields": proposal.selected_fields,
                     "class_counts": counts,
                     "assignment_count": len(proposal.assignments),
-                    "rationale": rationale,
-                    "contrast_definition": contrast,
+                    "rationale": proposal.rationale,
+                    "contrast_definition": proposal.contrast_definition,
+                    "warnings": proposal.warnings,
                 },
-                "message": "Review the deterministic field projection before saving it.",
+                "class_selection": decision,
+                "message": (
+                    "Review the Class chosen from the declared experimental factors before saving it."
+                    if decision is not None
+                    else "Review the deterministic field projection before saving it."
+                ),
             }
+        proposal.status = ACCEPTED_STATUS
         with Catalog(_database(database)) as catalog:
             catalog.save_class_proposal(proposal)
         return {"saved": True, "proposal": proposal.as_dict()}
@@ -310,6 +376,7 @@ def msdial_catalog_save_class_proposal(
         model=model,
         prompt_hash=hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
     )
+    proposal.status = ACCEPTED_STATUS
     with Catalog(_database(database)) as catalog:
         validate_class_proposal(unit, proposal)
         catalog.save_class_proposal(proposal)
