@@ -238,10 +238,18 @@ def analysis_samples(unit: dict[str, Any]) -> list[dict[str, Any]]:
 # may be analysed, or the sample is measured twice and aligned against itself. The vendor
 # container is preferred, on the analyst's instruction of 2026-09-21: its readers are the more
 # stable of the two in practice.
+# Exactly the formats MS-DIAL opens, from SupportMsRawDataExtension in
+# MsdialCore/Enum/SupportFormat.cs: abf, ibf, cdf, mzml, wiff, raw, d, wiff2, qgd, lcd, lrp, imzml.
 VENDOR_RAW_SUFFIXES: tuple[str, ...] = (
-    ".raw", ".d", ".wiff", ".wiff2", ".lcd", ".qgd", ".cdf", ".baf", ".tdf", ".yep", ".fid",
+    ".raw", ".d", ".wiff", ".wiff2", ".lcd", ".qgd", ".abf", ".ibf", ".cdf", ".lrp",
 )
-CONVERTED_SUFFIXES: tuple[str, ...] = (".mzml", ".mzxml", ".mzdata", ".mgf", ".ibd")
+CONVERTED_SUFFIXES: tuple[str, ...] = (".mzml", ".imzml")
+
+# MS-DIAL HAS NO mzXML PARSER. The enum above has no mzxml member, and the analyst who wrote the
+# readers confirmed it on 2026-09-21. An mzXML file must go through ProteoWizard msconvert to mzML
+# before MS-DIAL can open it, so listing it as a converted input would queue a run that cannot
+# start. Eight campaign-eligible units hold mzXML and nothing else.
+UNREADABLE_SUFFIXES: tuple[str, ...] = (".mzxml", ".mzdata", ".mgf", ".ibd", ".dat", ".scan")
 
 
 def _container_stem(path: str) -> str:
@@ -252,7 +260,9 @@ def _container_stem(path: str) -> str:
     that 01026_Bread_nega.RAW and 01026_Bread_nega.mzXML name one sample rather than two.
     """
     value = str(path or "").replace("\\", "/").casefold().rsplit("/", 1)[-1]
-    for suffix in sorted(VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES, key=len, reverse=True):
+    for suffix in sorted(
+        VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES + UNREADABLE_SUFFIXES, key=len, reverse=True
+    ):
         if value.endswith(suffix):
             return value[: -len(suffix)]
     return value
@@ -260,6 +270,9 @@ def _container_stem(path: str) -> str:
 
 def _container_kind(path: str) -> str:
     value = str(path or "").replace("\\", "/").casefold()
+    for suffix in UNREADABLE_SUFFIXES:
+        if value.endswith(suffix):
+            return "unreadable"
     for suffix in CONVERTED_SUFFIXES:
         if value.endswith(suffix):
             return "converted"
@@ -333,23 +346,37 @@ def _prefer_one_container_per_sample(files: list[dict[str, Any]]) -> None:
         kind = _container_kind(path)
         if kind:
             by_stem[_container_stem(path)].append(item)
-    for stem, group in by_stem.items():
+    for _stem, group in by_stem.items():
+        kinds = {
+            id(item): _container_kind(str(item.get("path") or item.get("name") or ""))
+            for item in group
+        }
+        # A format MS-DIAL cannot open is never the file to analyse. It is marked wherever it
+        # appears, alone or not, so a unit holding only these says so rather than queueing a run
+        # that cannot start.
+        for item in group:
+            if kinds[id(item)] == "unreadable":
+                item["requires_conversion"] = (
+                    "MS-DIAL has no reader for this format; convert it to mzML with ProteoWizard "
+                    "msconvert before analysing it"
+                )
         if len(group) < 2:
             continue
-        vendor = [
-            item
-            for item in group
-            if _container_kind(str(item.get("path") or item.get("name") or "")) == "vendor"
-        ]
-        if not vendor or len(vendor) == len(group):
-            # Either nothing to prefer, or the duplicates are all of one kind and this rule has
-            # no opinion about which of them to read.
+        readable = [item for item in group if kinds[id(item)] in {"vendor", "converted"}]
+        vendor = [item for item in group if kinds[id(item)] == "vendor"]
+        preferred = vendor or readable
+        if not preferred or len(preferred) == len(group):
+            # Either nothing MS-DIAL can read, or the duplicates are equally preferred and this
+            # rule has no opinion about which of them to open.
             continue
         for item in group:
-            if item not in vendor:
+            if item not in preferred:
                 item["role"] = "raw_alternate"
                 item["demoted_because"] = (
                     "a vendor raw container for the same sample is published alongside it"
+                    if vendor
+                    else "MS-DIAL cannot read this format and a readable container is published "
+                    "alongside it"
                 )
 
 
@@ -372,7 +399,14 @@ def _file_role(item: dict[str, Any], known_paths: set[str]) -> str:
     if path.endswith(".wiff.scan"):
         return "sidecar"
     role = str(item.get("role") or "raw")
-    if path.endswith(".wiff2") and path.removesuffix(".wiff2") + ".wiff" in known_paths:
+    # WIFF2 WINS, ALWAYS. This used to demote the .wiff2 when a .wiff for the same sample was
+    # published beside it. The two encode the same acquisition, and exactly one may be analysed or
+    # the sample is measured twice; which one to keep was decided by the analyst on 2026-09-21 in
+    # favour of .wiff2 for every acquisition, rather than reading .wiff2 only for SCIEX ZT Scan
+    # DIA. The narrower rule would have needed the acquisition method, which no repository field
+    # states and only the .wiff2 header carries -- so it would have been a guess wearing the
+    # clothes of a decision, and the campaign has enough of those.
+    if path.endswith(".wiff") and path.removesuffix(".wiff") + ".wiff2" in known_paths:
         return "raw_alternate"
     return role
 

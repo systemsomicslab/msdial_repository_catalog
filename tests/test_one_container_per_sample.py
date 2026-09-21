@@ -16,9 +16,14 @@ import unittest
 
 from msdial_repository_catalog.class_proposal import (
     CONVERTED_SUFFIXES,
+    UNREADABLE_SUFFIXES,
     VENDOR_RAW_SUFFIXES,
     normalize_file_roles,
 )
+
+
+def _files(*paths: str) -> list[dict]:
+    return normalize_file_roles([{"path": path, "role": "raw"} for path in paths])
 
 
 def _roles(*paths: str) -> dict[str, str]:
@@ -35,7 +40,7 @@ class VendorWinsTests(unittest.TestCase):
         self.assertEqual("raw_alternate", roles["raw/01026_Bread_nega.mzXML"])
 
     def test_it_works_for_every_vendor_family_the_campaign_meets(self) -> None:
-        for vendor in (".d", ".raw", ".lcd", ".wiff", ".cdf"):
+        for vendor in (".d", ".raw", ".lcd", ".wiff2", ".cdf", ".abf", ".qgd"):
             roles = _roles(f"raw/sample{vendor}", "raw/sample.mzML")
             self.assertEqual("raw", roles[f"raw/sample{vendor}"], vendor)
             self.assertEqual("raw_alternate", roles["raw/sample.mzML"], vendor)
@@ -62,22 +67,32 @@ class VendorWinsTests(unittest.TestCase):
 
 
 class NoOpinionTests(unittest.TestCase):
-    def test_two_converted_encodings_are_left_alone(self) -> None:
-        """This rule is about vendor versus converted. It has no view on mzML versus mzXML.
+    def test_two_equally_preferred_containers_are_left_alone(self) -> None:
+        """Where nobody has stated a preference, this rule does not invent one.
 
-        Choosing between them would be a preference nobody has stated, and inventing one is how
-        an unevidenced decision enters a pipeline.
+        Two vendor containers of the same sample that are not the .wiff/.wiff2 pair: choosing
+        between them would be a preference nobody has expressed, and inventing one is how an
+        unevidenced decision enters a pipeline. The .wiff pair is different only because the
+        analyst decided it.
         """
-        roles = _roles("raw/both_open.mzML", "raw/both_open.mzXML")
+        roles = _roles("raw/both_vendor.raw", "raw/both_vendor.d")
 
         self.assertEqual({"raw"}, set(roles.values()))
 
-    def test_two_vendor_containers_are_left_to_the_rule_that_knows_them(self) -> None:
-        """.wiff versus .wiff2 is decided earlier, by _file_role, and this must not undo it."""
+    def test_wiff2_wins_over_wiff_always(self) -> None:
+        """Decided by the analyst on 2026-09-21, and deliberately not conditional.
+
+        The narrower rule would have been "read the .wiff2 only for SCIEX ZT Scan DIA", which
+        needs the acquisition method - something no repository field states and only the .wiff2
+        header carries. That would have been a guess wearing the clothes of a decision.
+        """
         roles = _roles("raw/sample.wiff", "raw/sample.wiff2")
 
-        self.assertEqual("raw", roles["raw/sample.wiff"])
-        self.assertEqual("raw_alternate", roles["raw/sample.wiff2"])
+        self.assertEqual("raw_alternate", roles["raw/sample.wiff"])
+        self.assertEqual("raw", roles["raw/sample.wiff2"])
+
+    def test_a_wiff_without_a_wiff2_is_still_the_input(self) -> None:
+        self.assertEqual("raw", _roles("raw/sample.wiff")["raw/sample.wiff"])
 
     def test_different_samples_are_never_paired(self) -> None:
         roles = _roles("raw/sample_01.d", "raw/sample_02.mzML")
@@ -98,11 +113,54 @@ class SuffixTableTests(unittest.TestCase):
         self.assertEqual(set(), set(VENDOR_RAW_SUFFIXES) & set(CONVERTED_SUFFIXES))
 
     def test_wiff2_is_listed_as_vendor_so_it_is_never_demoted_to_an_mzml(self) -> None:
-        """ZT Scan DIA reads the .wiff2, and a converted file must not outrank it."""
         self.assertIn(".wiff2", VENDOR_RAW_SUFFIXES)
         roles = _roles("raw/sample.wiff2", "raw/sample.mzML")
         self.assertEqual("raw", roles["raw/sample.wiff2"])
         self.assertEqual("raw_alternate", roles["raw/sample.mzML"])
+
+    def test_the_lists_hold_only_what_msdial_opens(self) -> None:
+        """SupportMsRawDataExtension: abf, ibf, cdf, mzml, wiff, raw, d, wiff2, qgd, lcd, lrp, imzml."""
+        supported = {
+            ".abf", ".ibf", ".cdf", ".mzml", ".wiff", ".raw", ".d", ".wiff2",
+            ".qgd", ".lcd", ".lrp", ".imzml",
+        }
+        self.assertTrue(set(VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES) <= supported)
+        self.assertEqual(set(), set(UNREADABLE_SUFFIXES) & supported)
+
+
+class NoMzxmlReaderTests(unittest.TestCase):
+    """MS-DIAL has no mzXML parser, confirmed against SupportFormat.cs and by its author.
+
+    Eight campaign-eligible units hold mzXML and nothing else. Treating it as an input would queue
+    a run that cannot start, and the failure would surface inside MS-DIAL rather than before it.
+    """
+
+    def test_mzxml_is_not_a_readable_format(self) -> None:
+        self.assertIn(".mzxml", UNREADABLE_SUFFIXES)
+        self.assertNotIn(".mzxml", VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES)
+
+    def test_an_mzxml_is_marked_wherever_it_appears(self) -> None:
+        """Alone, it stays the unit's only file and says what has to happen to it."""
+        item = _files("raw/only.mzXML")[0]
+
+        self.assertIn("msconvert", item["requires_conversion"])
+
+    def test_an_mzxml_loses_to_a_vendor_container(self) -> None:
+        """THE MTBKS157 SHAPE: sixteen samples published as .RAW and again as .mzXML."""
+        roles = {f["path"]: f["role"] for f in _files("raw/s.RAW", "raw/s.mzXML")}
+
+        self.assertEqual("raw", roles["raw/s.RAW"])
+        self.assertEqual("raw_alternate", roles["raw/s.mzXML"])
+
+    def test_an_mzxml_loses_to_an_mzml_of_the_same_sample(self) -> None:
+        """Here the converted file wins, because the other converted file cannot be read at all."""
+        result = _files("raw/s.mzML", "raw/s.mzXML")
+        roles = {f["path"]: f["role"] for f in result}
+
+        self.assertEqual("raw", roles["raw/s.mzML"])
+        self.assertEqual("raw_alternate", roles["raw/s.mzXML"])
+        demoted = next(f for f in result if f["role"] == "raw_alternate")
+        self.assertIn("cannot read this format", demoted["demoted_because"])
 
 
 if __name__ == "__main__":  # pragma: no cover

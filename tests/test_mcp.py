@@ -180,7 +180,12 @@ class McpCatalogTests(unittest.TestCase):
             self.assertEqual(2, handoff["sample_count"])
             self.assertEqual(2, handoff["analytical_sample_count"])
             self.assertEqual(2, len(sample_rows))
-            self.assertTrue(all(row["raw_file"].endswith(".wiff") for row in sample_rows))
+            # One row per sample, named for the container that will be analysed. That is the
+            # .wiff2 from 2026-09-21: the two encode the same acquisition, exactly one may be
+            # analysed, and the analyst chose .wiff2 for every acquisition rather than only for
+            # SCIEX ZT Scan DIA - which would have needed an acquisition method no repository
+            # field states.
+            self.assertTrue(all(row["raw_file"].endswith(".wiff2") for row in sample_rows))
             self.assertTrue(all(len(row["related_files"]) == 3 for row in sample_rows))
             self.assertEqual("none_recorded", handoff["publication_status"])
             self.assertEqual(2, unit["sample_count"])
@@ -194,7 +199,11 @@ class McpCatalogTests(unittest.TestCase):
             )
             self.assertEqual(unit["file_count"], len(file_rows))
             roles = {Path(item["path"]).suffix: item["role"] for item in file_rows}
-            self.assertEqual("raw_alternate", roles[".wiff2"])
+            # The .wiff2 is the container analysed and the .wiff is its alternate, reversed from
+            # the original rule on 2026-09-21. Both encode the same acquisition and exactly one
+            # may be analysed, or the sample is measured twice.
+            self.assertEqual("raw", roles[".wiff2"])
+            self.assertEqual("raw_alternate", roles[".wiff"])
             self.assertTrue(
                 all(
                     item["role"] == "auxiliary"
@@ -210,13 +219,16 @@ class McpCatalogTests(unittest.TestCase):
                     self.assertTrue(item["sample_id_resolved"])
                 else:
                     self.assertFalse(item["sample_id_resolved"])
-            self.assertTrue(
-                all(
-                    item.get("parent_file", "").endswith(".wiff")
-                    for item in file_rows
-                    if item["role"] in {"sidecar", "auxiliary"}
-                )
-            )
+            # Every sidecar and auxiliary resolves to the container that will be analysed, which
+            # is what makes its sample_id nameable. Since 2026-09-21 that container is the .wiff2.
+            # A .wiff.scan is the SCIEX pair-mate of the .wiff rather than of the .wiff2, but what
+            # parent_file exists to answer is which analytical sample the file belongs to, and
+            # that sample is represented by the container the run opens.
+            primary = {item["path"] for item in file_rows if item["role"] == "raw"}
+            self.assertTrue(primary)
+            for item in file_rows:
+                if item["role"] in {"sidecar", "auxiliary"}:
+                    self.assertIn(item.get("parent_file", ""), primary, item["path"])
             self.assertEqual(2, search["matches"][0]["sample_count"])
 
     def test_analysis_unit_response_stays_bounded_on_a_large_file_manifest(self) -> None:
