@@ -78,10 +78,23 @@ class MetabolomicsWorkbenchAdapter:
             if ion_mode == "Unknown":
                 ion_mode = infer_ion_mode(analysis.get("analysis_summary"), combined)
             unit_files, ambiguous_files = _partition_archives(archives, analysis_id, ion_mode, multiple)
+            unit_samples, unpartitioned_reason = _partition_samples(samples, ion_mode, multiple)
             warnings: list[str] = []
-            if multiple:
+            if multiple and unpartitioned_reason:
+                # The warning this used to carry unconditionally said "verify that each sample
+                # belongs to this analysis_id" and nothing ever did. It is now raised only when
+                # the split genuinely could not be made, and it says what stopped it.
                 warnings.append(
-                    "Metabolomics Workbench factors are study-level; verify that each sample belongs to this analysis_id."
+                    "Metabolomics Workbench factors are study-level and this unit's samples could "
+                    f"not be split from the study's: {unpartitioned_reason}. Every sample of the "
+                    "study is listed here, so verify that each one belongs to this analysis_id "
+                    "before running it."
+                )
+            elif multiple:
+                warnings.append(
+                    f"Samples were split from the study-level factor table by the ion mode their "
+                    f"raw-file names state: {len(unit_samples)} of {len(samples)} belong to this "
+                    "analysis unit."
                 )
             if ambiguous_files:
                 warnings.append(
@@ -101,8 +114,11 @@ class MetabolomicsWorkbenchAdapter:
                     "instrument": str(analysis.get("ms_instrument_name") or analysis.get("instrument_name") or analysis.get("instrument") or ""),
                     "target_omics": infer_omics(study_text, combined),
                     "untargeted": infer_untargeted(study_text, combined),
-                    "review_status": "needs_review" if multiple or ambiguous_files else "unreviewed",
-                    "sample_metadata": samples,
+                    # needs_review used to mean only "this study had more than one unit", which was true of
+                    # every multi-unit study and therefore said nothing. It now means the sample
+                    # split could not be made, or the archives could not be assigned to one unit.
+                    "review_status": "needs_review" if unpartitioned_reason or ambiguous_files else "unreviewed",
+                    "sample_metadata": unit_samples,
                     "files": unit_files,
                     "evidence": [
                         source_evidence(analysis_url, "analysis_id", analysis_id),
@@ -159,6 +175,79 @@ def _partition_archives(
     if matched:
         return matched, False
     return [{**item, "role": "shared_raw_archive"} for item in archives], bool(archives)
+
+
+_POLARITY_TOKEN = re.compile(r"^(?P<mode>pos|neg)(?:itive|ative)?\d*$", re.IGNORECASE)
+
+
+def file_polarity(name: str) -> str:
+    """The ion mode a raw-file name states, or "" when it states none.
+
+    Token-wise rather than by substring, because a substring test reads "pos" out of words that
+    have nothing to do with polarity. One real study in this catalog is named
+    211210_SVC_Pozzi__Lipidomics_NEG_S01.mzXML, and a submitter surname is not an ion mode.
+    """
+    tokens = re.split(r"[^A-Za-z0-9]+", str(name or ""))
+    found = {
+        match.group("mode").casefold()
+        for token in tokens
+        if (match := _POLARITY_TOKEN.match(token))
+    }
+    if len(found) != 1:
+        return ""
+    return "Positive" if found.pop() == "pos" else "Negative"
+
+
+def _partition_samples(
+    samples: list[dict[str, Any]], ion_mode: str, multiple: bool
+) -> tuple[list[dict[str, Any]], str]:
+    """Return the study samples that belong to THIS analysis unit, and why.
+
+    WHAT THIS ENDS. Metabolomics Workbench publishes its factor table at study level, so this
+    adapter computed the sample list once and gave the same list to every analysis unit -- and
+    said so, in a warning on every such unit: "Metabolomics Workbench factors are study-level;
+    verify that each sample belongs to this analysis_id." Nothing ever verified it. Measured on
+    2026-09-21: of 536 studies holding a campaign-eligible LC-MS unit, 291 had units whose file
+    lists were byte-for-byte identical. ST003038's "DDA Positive" and "DDA Negative" units each
+    held the same twenty files, ten named POS and ten named NEG, so either unit would have
+    aligned both polarities together.
+
+    The evidence to split them was already present and unused: every sample carries a raw_file
+    name, and those names state the polarity. This uses that, the same way _partition_archives
+    already uses it for archive names.
+
+    WHAT IT WILL NOT DO. It never invents a split. If the file names do not state a polarity, if
+    only one polarity is present, or if the unit itself is labelled Both or Unknown, the whole
+    list is returned with a reason, and the caller marks the unit for review rather than
+    recording a determination nothing supports.
+    """
+    if not multiple or ion_mode not in {"Positive", "Negative"}:
+        return samples, ""
+    labelled = [(item, file_polarity(item.get("raw_file", ""))) for item in samples]
+    stated = {polarity for _, polarity in labelled if polarity}
+    if not stated:
+        return samples, "raw-file names state no ion mode, so samples could not be split by polarity"
+    if len(stated) == 1:
+        # Every file names the same polarity. Either the study really is single-polarity and the
+        # unit list is already right, or the unit's own label disagrees with every file it holds.
+        only = stated.pop()
+        if only != ion_mode:
+            return samples, (
+                f"every raw-file name states {only} but this unit is labelled {ion_mode}"
+            )
+        return samples, ""
+    matched = [item for item, polarity in labelled if polarity == ion_mode]
+    unstated = [item for item, polarity in labelled if not polarity]
+    if not matched:
+        return samples, (
+            f"the study holds both polarities and none of the raw-file names states {ion_mode}"
+        )
+    if unstated:
+        return samples, (
+            f"{len(unstated)} of {len(samples)} raw-file names state no ion mode, so the split "
+            "would silently drop them"
+        )
+    return matched, ""
 
 
 def _samples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
