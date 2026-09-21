@@ -230,6 +230,45 @@ def analysis_samples(unit: dict[str, Any]) -> list[dict[str, Any]]:
     return selected
 
 
+# The containers MS-DIAL opens directly, split by how they were produced. A vendor container is
+# what the instrument wrote; a converted one is an open re-encoding of it.
+#
+# WHICH ONE WINS, AND WHY. When a repository publishes both for the same sample -- MetaboBank
+# MTBKS157 publishes every one of its sixteen samples as .RAW and again as .mzXML -- exactly one
+# may be analysed, or the sample is measured twice and aligned against itself. The vendor
+# container is preferred, on the analyst's instruction of 2026-09-21: its readers are the more
+# stable of the two in practice.
+VENDOR_RAW_SUFFIXES: tuple[str, ...] = (
+    ".raw", ".d", ".wiff", ".wiff2", ".lcd", ".qgd", ".cdf", ".baf", ".tdf", ".yep", ".fid",
+)
+CONVERTED_SUFFIXES: tuple[str, ...] = (".mzml", ".mzxml", ".mzdata", ".mgf", ".ibd")
+
+
+def _container_stem(path: str) -> str:
+    """The sample a container belongs to: its basename with the container suffix removed.
+
+    _primary_stem strips only the .wiff family, because that is all it was written for. Pairing a
+    vendor container with its converted twin needs the suffix gone whichever family it is from, so
+    that 01026_Bread_nega.RAW and 01026_Bread_nega.mzXML name one sample rather than two.
+    """
+    value = str(path or "").replace("\\", "/").casefold().rsplit("/", 1)[-1]
+    for suffix in sorted(VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES, key=len, reverse=True):
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _container_kind(path: str) -> str:
+    value = str(path or "").replace("\\", "/").casefold()
+    for suffix in CONVERTED_SUFFIXES:
+        if value.endswith(suffix):
+            return "converted"
+    for suffix in VENDOR_RAW_SUFFIXES:
+        if value.endswith(suffix):
+            return "vendor"
+    return ""
+
+
 def normalize_file_roles(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Classify primary, alternate, sidecar, and auxiliary raw-data containers."""
     result = [dict(item) for item in files]
@@ -239,6 +278,7 @@ def normalize_file_roles(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     for item in result:
         item["role"] = _file_role(item, known_paths)
+    _prefer_one_container_per_sample(result)
     # A sidecar or auxiliary container arrives carrying a sample_id derived from
     # its own basename, which names no row in the sample table: half a manifest's
     # rows held a dangling key, and anything joining files to samples on it either
@@ -265,6 +305,52 @@ def normalize_file_roles(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item["parent_file"] = str(parent.get("path") or parent.get("name") or "")
         item["sample_id_resolved"] = bool(item["sample_id"])
     return result
+
+
+def _prefer_one_container_per_sample(files: list[dict[str, Any]]) -> None:
+    """Leave exactly one analysable container per sample, demoting the rest to raw_alternate.
+
+    WHAT THIS ENDS. MetaboBank MTBKS157 publishes each of its sixteen samples twice, once as .RAW
+    and once as .mzXML, and both arrived with role "raw" -- thirty-two analysis inputs for sixteen
+    samples. MS-DIAL would have detected every peak twice and aligned each sample against its own
+    second encoding, which looks like perfect reproducibility and is an artefact of the manifest.
+
+    The vendor container wins. Its readers are the more stable of the two in practice, which is the
+    analyst's instruction of 2026-09-21; the demoted file keeps role raw_alternate rather than
+    being dropped, so a run that cannot read the vendor format can still find it.
+
+    The .wiff/.wiff2 pair is decided separately and earlier, in _file_role: .wiff2 is demoted when
+    a .wiff for the same sample exists. That default is right for every acquisition except SCIEX
+    ZT Scan DIA, where the .wiff2 is the one to read -- and nothing in repository metadata
+    establishes that an acquisition was ZT Scan DIA, so it is not guessed at here. Resolving it
+    needs the .wiff2 header, which only the raw-header preflight can read.
+    """
+    by_stem: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in files:
+        if item.get("role") != "raw":
+            continue
+        path = str(item.get("path") or item.get("name") or "")
+        kind = _container_kind(path)
+        if kind:
+            by_stem[_container_stem(path)].append(item)
+    for stem, group in by_stem.items():
+        if len(group) < 2:
+            continue
+        vendor = [
+            item
+            for item in group
+            if _container_kind(str(item.get("path") or item.get("name") or "")) == "vendor"
+        ]
+        if not vendor or len(vendor) == len(group):
+            # Either nothing to prefer, or the duplicates are all of one kind and this rule has
+            # no opinion about which of them to read.
+            continue
+        for item in group:
+            if item not in vendor:
+                item["role"] = "raw_alternate"
+                item["demoted_because"] = (
+                    "a vendor raw container for the same sample is published alongside it"
+                )
 
 
 def normalize_analysis_unit(unit: dict[str, Any]) -> dict[str, Any]:
