@@ -56,6 +56,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     update.add_argument("--limit", type=int)
 
+    reparse = commands.add_parser(
+        "reparse",
+        help="Re-apply adapter fixes to stored payloads without contacting any repository service",
+    )
+    reparse.add_argument(
+        "--repository", action="append", choices=list(REPOSITORIES),
+        help="Repository to re-parse; repeat as needed. Defaults to all repositories.",
+    )
+    reparse.add_argument(
+        "--parser-version", required=True,
+        help="The parser version to stamp on re-parsed records; must differ from the stored one.",
+    )
+    reparse.add_argument("--limit", type=int)
+
     search = commands.add_parser("search", help="Search local analysis units")
     for name in (
         "text", "repository", "separation", "chromatography", "ion-mode",
@@ -105,6 +119,16 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--include-provenance", action="store_true")
 
     args = parser.parse_args(argv)
+    if args.command == "reparse":
+        from .reparse import reparse_catalog
+
+        selected = args.repository or list(REPOSITORIES)
+        with Catalog(args.database) as catalog:
+            result = reparse_catalog(
+                catalog, selected, parser_version=args.parser_version, limit=args.limit
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "update":
         manager = UpdateJobManager(args.database)
         manager.start(args.repository, mode=args.mode, limit=args.limit)
