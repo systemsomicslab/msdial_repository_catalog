@@ -36,6 +36,79 @@ class MetabolomicsWorkbenchAdapter:
         text = self.client.get_text(f"{self.base}/rest/study/study_id/ST/available/json")
         return sorted(set(re.findall(r"(?m)^study_id\t(ST\d+)", text)))
 
+    def reparse_units(self, payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """Re-apply this adapter's sample attribution to a stored payload, without the network.
+
+        WHY A LOCAL RE-PARSE EXISTS. A crawl skips a study whose source hash and parser version
+        both match what is stored, so an adapter fix does not reach the records it was written
+        for until the parser version is bumped -- and even then it costs a full re-fetch. The
+        2026-09-21 crawl took twenty-five hours and re-applied nothing, because the code it
+        changed was in a process that had imported the module before the merge, and because the
+        remote payloads had not changed.
+
+        The payloads are kept, so the fix can be applied to them where it depends only on what
+        was stored. This re-applies the SAMPLE ATTRIBUTION and nothing else: the study-level
+        factor table is rebuilt from repository_metadata["factors"] and split per unit by the ion
+        mode the unit already records.
+
+        WHAT IT DELIBERATELY DOES NOT REDO. inspect_metadata also reads the study's HTML detail
+        page and its download page, and neither is stored. Every inferred field -- acquisition
+        mode, chromatography, target omics, untargeted -- is derived from text that includes the
+        detail page, so re-deriving them here would silently change them using less evidence than
+        the original crawl had. Those fields are left exactly as stored. Re-deriving them needs a
+        real re-crawl.
+
+        Returns None when the payload does not carry what this needs, so the caller records the
+        study as not re-parsable rather than rewriting it from nothing.
+        """
+        metadata = payload.get("repository_metadata")
+        units = payload.get("analysis_units")
+        if not isinstance(metadata, dict) or not isinstance(units, list) or not units:
+            return None
+        factors = metadata.get("factors")
+        if not isinstance(factors, list) or not factors:
+            return None
+        samples = _samples(factors)
+        if not samples:
+            return None
+        multiple = len(units) > 1
+        rebuilt: list[dict[str, Any]] = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                return None
+            ion_mode = str(unit.get("ion_mode") or "Unknown")
+            unit_samples, reason = _partition_samples(samples, ion_mode, multiple)
+            warnings = [
+                item
+                for item in (unit.get("warnings") or [])
+                if "factors are study-level" not in str(item)
+                and "Samples were split from the study-level factor table" not in str(item)
+            ]
+            if multiple and reason:
+                warnings.append(
+                    "Metabolomics Workbench factors are study-level and this unit's samples could "
+                    f"not be split from the study's: {reason}. Every sample of the study is listed "
+                    "here, so verify that each one belongs to this analysis_id before running it."
+                )
+            elif multiple:
+                warnings.append(
+                    "Samples were split from the study-level factor table by the ion mode their "
+                    f"raw-file names state: {len(unit_samples)} of {len(samples)} belong to this "
+                    "analysis unit."
+                )
+            ambiguous = any(
+                "could not be assigned uniquely" in str(item) for item in warnings
+            )
+            rebuilt.append(
+                {
+                    **unit,
+                    "sample_metadata": unit_samples,
+                    "warnings": warnings,
+                    "review_status": "needs_review" if reason or ambiguous else "unreviewed",
+                }
+            )
+        return rebuilt
+
     def inspect_metadata(self, accession: str) -> dict[str, Any]:
         accession = accession.upper()
         summary_url = f"{self.base}/rest/study/study_id/{accession}/summary/json"
