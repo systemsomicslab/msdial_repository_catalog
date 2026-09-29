@@ -116,6 +116,7 @@ def candidate_fields(unit: dict[str, Any]) -> list[dict[str, Any]]:
 # scientific decision too.
 ABSTENTION_KIND = "abstention"
 ABSTENTION_LABEL = "All"
+ABSTENTION_REASONS = ("no_declared_factor", "no_usable_declared_factor")
 
 
 def field_based_proposal(
@@ -170,12 +171,15 @@ def validate_class_proposal(unit: dict[str, Any], proposal: ClassProposal) -> No
         problems.append("rationale is empty")
     abstention = is_abstention(proposal)
     if abstention:
-        # An abstention selects no field and puts every sample in one Class: no contrast.
+        # An abstention selects no field and puts every sample in the one Class ABSTENTION_LABEL, for
+        # a reason the selection gives: exactly what abstention_record writes.
         if proposal.selected_fields:
             problems.append("an abstention selects no field")
         labels = {item.class_label for item in proposal.assignments}
-        if len(labels) > 1:
-            problems.append(f"an abstention puts every sample in one Class, not {len(labels)}")
+        if labels != {ABSTENTION_LABEL} or proposal.contrast_definition.get("class_label") != ABSTENTION_LABEL:
+            problems.append(f"an abstention puts every sample in the one Class {ABSTENTION_LABEL!r}")
+        if proposal.contrast_definition.get("reason") not in ABSTENTION_REASONS:
+            problems.append(f"an abstention's reason is one of {', '.join(ABSTENTION_REASONS)}")
     elif not proposal.selected_fields:
         problems.append("selected_fields is empty")
     for assignment in proposal.assignments:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .class_proposal import (
+    ABSTENTION_KIND,
     analysis_samples,
     build_class_proposal_request,
     field_based_proposal,
@@ -300,7 +301,10 @@ def msdial_catalog_save_class_proposal(
     if abstain:
         if assignments_payload or selected_fields:
             return {"saved": False, "message": "An abstention names no field and no assignment."}
-        record, decision = abstention_record(unit, purpose)
+        try:
+            record, decision = abstention_record(unit, purpose)
+        except ValueError as exc:
+            return {"saved": False, "message": f"The abstention could not be recorded: {exc}"}
         if record is None:
             return {
                 "saved": False,
@@ -332,6 +336,9 @@ def msdial_catalog_save_class_proposal(
         with Catalog(_database(database)) as catalog:
             catalog.save_class_proposal(record)
         return {"saved": True, "abstention": True, "proposal": record.as_dict()}
+    if contrast.get("kind") == ABSTENTION_KIND:
+        # An abstention is the catalog's own record of its selection, never an agent's contrast.
+        return {"saved": False, "message": "An abstention is recorded with abstain=True, not as a contrast definition."}
     if not assignments_payload:
         decision: dict[str, Any] | None = None
         if selected_fields:
@@ -448,6 +455,11 @@ def msdial_catalog_reanalysis_handoff(
     blocking_reasons = [f"technical_metadata:{field}" for field in required_review]
     if proposal is None:
         blocking_reasons.append("class_proposal:missing")
+    elif str(proposal.get("unit_id") or "") != unit_id:
+        # A Class record saved for another unit settles nothing here, however it was ratified.
+        blocking_reasons.append("class_proposal:other_unit")
+    elif str(proposal.get("status") or "") != ACCEPTED_STATUS:
+        blocking_reasons.append("class_proposal:not_accepted")
     files = _handoff_files(unit["files"])
     primary_files = [item for item in files if item.get("role", "raw") == "raw"]
     analytical_samples = {

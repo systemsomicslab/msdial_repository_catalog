@@ -106,6 +106,35 @@ class McpCatalogTests(unittest.TestCase):
             self.assertTrue(handoff["sample_metadata_omitted"])
             self.assertTrue(Path(handoff["handoff_path"]).is_file())
 
+    def test_a_handoff_is_blocked_by_a_class_record_it_cannot_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            study = project_to_study(mixed_project())
+            unit_id, other_id = (unit.unit_id for unit in study.analysis_units[:2])
+            with Catalog(database) as catalog:
+                catalog.ingest_study(study)
+            saved = msdial_catalog_save_class_proposal(
+                other_id, "Compare age and genotype.", [], "", "", abstain=True, confirmed=True,
+                database=database,
+            )
+            self.assertTrue(saved.get("saved"), saved)
+            proposal_id = saved["proposal"]["proposal_id"]
+
+            # A ratified record for another unit settles nothing here.
+            elsewhere = msdial_catalog_reanalysis_handoff(unit_id, proposal_id, database)
+            self.assertIn("class_proposal:other_unit", elsewhere["blocking_reasons"])
+            self.assertFalse(elsewhere["ready_for_download_planning"])
+
+            # A record that was never ratified blocks its own unit.
+            with Catalog(database) as catalog:
+                catalog.connection.execute(
+                    "UPDATE class_proposal SET status = 'proposed' WHERE proposal_id = ?", (proposal_id,)
+                )
+                catalog.connection.commit()
+            unratified = msdial_catalog_reanalysis_handoff(other_id, proposal_id, database)
+            self.assertIn("class_proposal:not_accepted", unratified["blocking_reasons"])
+            self.assertFalse(unratified["ready_for_download_planning"])
+
     def test_handoff_uses_one_sample_row_per_primary_wiff(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = str(Path(temporary) / "catalog.sqlite")

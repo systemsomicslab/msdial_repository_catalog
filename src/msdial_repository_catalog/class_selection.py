@@ -209,10 +209,10 @@ def abstention_record(
     decision = select_class_fields(unit, purpose)
     if decision["decision"] != "abstained":
         return None, decision
-    samples = analysis_samples(unit)
+    # One assignment per sample, however many files it has (a sample injected twice is one sample).
+    sample_ids = list(dict.fromkeys(str(sample["sample_id"]) for sample in analysis_samples(unit)))
     assignments = [
-        ClassAssignment(sample_id=str(sample["sample_id"]), class_label=ABSTENTION_LABEL, values={})
-        for sample in samples
+        ClassAssignment(sample_id=sample_id, class_label=ABSTENTION_LABEL, values={}) for sample_id in sample_ids
     ]
     payload = json.dumps(
         {"unit_id": unit["unit_id"], "purpose": purpose, "abstention": decision["reason"],
