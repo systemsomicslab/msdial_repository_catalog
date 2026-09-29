@@ -151,7 +151,65 @@ class SavingItStillNeedsTheConfirmation(unittest.TestCase):
         self.assertFalse(result["saved"])
         self.assertEqual("no_declared_factor", result["class_selection"]["reason"])
         self.assertIn("declared no experimental factor", result["message"])
+        self.assertIn("abstain=True", result["next"])
         self.assertEqual(0, stored)
+
+    def test_an_abstention_is_recorded_only_when_asked_and_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(mixed_project(), database)
+
+            preview = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", [], "", "", abstain=True, database=database
+            )
+            with Catalog(database) as catalog:
+                after_preview = catalog.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0]
+            saved = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", [], "", "", abstain=True, confirmed=True, database=database
+            )
+            with Catalog(database) as catalog:
+                stored = catalog.get_class_proposal(saved["proposal"]["proposal_id"])
+
+        self.assertTrue(preview["confirmation_required"])
+        self.assertEqual("no_declared_factor", preview["abstention_preview"]["reason"])
+        self.assertEqual(0, after_preview, "a preview saves nothing")
+        self.assertTrue(saved["saved"])
+        self.assertTrue(saved["abstention"])
+        self.assertEqual("accepted", stored["status"])
+        self.assertEqual([], stored["selected_fields"])
+        self.assertEqual("abstention", stored["contrast_definition"]["kind"])
+        self.assertEqual("no_declared_factor", stored["contrast_definition"]["reason"])
+        self.assertEqual({"All"}, {item["class_label"] for item in stored["assignments"]})
+        self.assertIn("declared no experimental factor", stored["warnings"][0])
+        self.assertIn("carries no contrast", stored["warnings"][1])
+
+    def test_there_is_no_abstention_to_record_where_a_factor_defines_class(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(_declared_project(), database)
+
+            result = msdial_catalog_save_class_proposal(
+                unit_id, "Compare LPS against vehicle", [], "", "", abstain=True, confirmed=True,
+                database=database,
+            )
+            with Catalog(database) as catalog:
+                stored = catalog.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0]
+
+        self.assertFalse(result["saved"])
+        self.assertEqual("declared", result["class_selection"]["decision"])
+        self.assertEqual(0, stored)
+
+    def test_an_abstention_names_no_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(mixed_project(), database)
+
+            result = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", ["Genotype"], "", "", abstain=True, confirmed=True,
+                database=database,
+            )
+
+        self.assertFalse(result["saved"])
 
     def test_naming_the_fields_still_uses_them_and_nothing_else_changed(self) -> None:
         """The path a person takes is untouched: their fields, their rationale, their model."""
