@@ -111,6 +111,14 @@ def candidate_fields(unit: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: (-item["priority_score"], item["field"].casefold()))
 
 
+# The record of an abstention: no field was usable, so no contrast is defined and every sample
+# takes one Class. It is saved and ratified like a proposal, because declining to compare is a
+# scientific decision too.
+ABSTENTION_KIND = "abstention"
+ABSTENTION_LABEL = "All"
+ABSTENTION_REASONS = ("no_declared_factor", "no_usable_declared_factor")
+
+
 def field_based_proposal(
     unit: dict[str, Any],
     purpose: str,
@@ -161,7 +169,18 @@ def validate_class_proposal(unit: dict[str, Any], proposal: ClassProposal) -> No
         problems.append(f"unknown samples: {', '.join(extra)}")
     if not proposal.rationale.strip():
         problems.append("rationale is empty")
-    if not proposal.selected_fields:
+    abstention = is_abstention(proposal)
+    if abstention:
+        # An abstention selects no field and puts every sample in the one Class ABSTENTION_LABEL, for
+        # a reason the selection gives: exactly what abstention_record writes.
+        if proposal.selected_fields:
+            problems.append("an abstention selects no field")
+        labels = {item.class_label for item in proposal.assignments}
+        if labels != {ABSTENTION_LABEL} or proposal.contrast_definition.get("class_label") != ABSTENTION_LABEL:
+            problems.append(f"an abstention puts every sample in the one Class {ABSTENTION_LABEL!r}")
+        if proposal.contrast_definition.get("reason") not in ABSTENTION_REASONS:
+            problems.append(f"an abstention's reason is one of {', '.join(ABSTENTION_REASONS)}")
+    elif not proposal.selected_fields:
         problems.append("selected_fields is empty")
     for assignment in proposal.assignments:
         if not assignment.class_label.strip():
@@ -170,6 +189,11 @@ def validate_class_proposal(unit: dict[str, Any], proposal: ClassProposal) -> No
             problems.append(f"invalid Class delimiter for {assignment.sample_id}")
     if problems:
         raise ValueError("Invalid Class proposal: " + "; ".join(problems))
+
+
+def is_abstention(proposal: ClassProposal) -> bool:
+    """Whether the record says no Class was defined: the unit runs with no contrast."""
+    return (proposal.contrast_definition or {}).get("kind") == ABSTENTION_KIND
 
 
 def analysis_samples(unit: dict[str, Any]) -> list[dict[str, Any]]:

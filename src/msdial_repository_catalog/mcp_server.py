@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .class_proposal import (
+    ABSTENTION_KIND,
     analysis_samples,
     build_class_proposal_request,
     field_based_proposal,
     normalize_file_roles,
     validate_class_proposal,
 )
-from .class_selection import automatic_class_proposal, select_class_fields
+from .class_selection import abstention_record, automatic_class_proposal, select_class_fields
 
 from .models import ClassAssignment, ClassProposal, stable_id
 from .storage import Catalog
@@ -279,6 +280,7 @@ def msdial_catalog_save_class_proposal(
     model: str = "agent",
     confirmed: bool = False,
     database: str = "",
+    abstain: bool = False,
 ) -> dict[str, Any]:
     """Validate and save an agent Class proposal only after explicit user confirmation.
 
@@ -286,11 +288,57 @@ def msdial_catalog_save_class_proposal(
     from the columns the submitter declared as experimental factors, which is what an agent
     reanalysing a whole repository has to do; it abstains rather than guessing when nothing
     was declared. The confirmation is required either way.
+
+    `abstain=True` records that abstention, so that the unit can run with no contrast: every
+    sample in one Class, with the reason and the factors considered. It is saved only where the
+    catalog abstains, and only after the same confirmation, because declining to compare is a
+    decision the person ratifies like a grouping.
     """
     assignments_payload = json.loads(assignments_json) if assignments_json.strip() else []
     contrast = json.loads(contrast_definition_json or "{}")
     with Catalog(_database(database)) as catalog:
         unit = catalog.get_unit(unit_id)
+    if abstain:
+        if assignments_payload or selected_fields:
+            return {"saved": False, "message": "An abstention names no field and no assignment."}
+        try:
+            record, decision = abstention_record(unit, purpose)
+        except ValueError as exc:
+            return {"saved": False, "message": f"The abstention could not be recorded: {exc}"}
+        if record is None:
+            return {
+                "saved": False,
+                "class_selection": decision,
+                "message": (
+                    "The declared experimental factors define a Class for this unit, so there is no abstention "
+                    "to record. Review and save that proposal instead."
+                ),
+            }
+        if not confirmed:
+            return {
+                "confirmation_required": True,
+                "abstention_preview": {
+                    "unit_id": unit_id,
+                    "reason": decision["reason"],
+                    "rationale": record.rationale,
+                    "class_label": record.contrast_definition["class_label"],
+                    "assignment_count": len(record.assignments),
+                    "contrast_definition": record.contrast_definition,
+                    "warnings": record.warnings,
+                },
+                "class_selection": decision,
+                "message": (
+                    "Review the abstention before saving it: the run will carry no contrast, and every sample "
+                    "will take one Class."
+                ),
+            }
+        record.status = ACCEPTED_STATUS
+        with Catalog(_database(database)) as catalog:
+            catalog.save_class_proposal(record)
+        return {"saved": True, "abstention": True, "proposal": record.as_dict()}
+    if contrast.get("kind") == ABSTENTION_KIND:
+        # An abstention is the catalog's own record of its selection, never an agent's contrast.
+        return {"saved": False, "message": "An abstention is recorded with abstain=True, not as a contrast definition."}
     if not assignments_payload:
         decision: dict[str, Any] | None = None
         if selected_fields:
@@ -306,6 +354,8 @@ def msdial_catalog_save_class_proposal(
                     "saved": False,
                     "class_selection": decision,
                     "message": decision["notice"],
+                    "next": "To let the unit run with no contrast, record this abstention with abstain=True; "
+                            "it needs the same confirmation as a proposal.",
                 }
             proposal = selected
             if contrast:
@@ -405,6 +455,11 @@ def msdial_catalog_reanalysis_handoff(
     blocking_reasons = [f"technical_metadata:{field}" for field in required_review]
     if proposal is None:
         blocking_reasons.append("class_proposal:missing")
+    elif str(proposal.get("unit_id") or "") != unit_id:
+        # A Class record saved for another unit settles nothing here, however it was ratified.
+        blocking_reasons.append("class_proposal:other_unit")
+    elif str(proposal.get("status") or "") != ACCEPTED_STATUS:
+        blocking_reasons.append("class_proposal:not_accepted")
     files = _handoff_files(unit["files"])
     primary_files = [item for item in files if item.get("role", "raw") == "raw"]
     analytical_samples = {

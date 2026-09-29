@@ -22,17 +22,22 @@ grouping. The record travels in the proposal's `warnings`, which the catalog per
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
 from .class_proposal import (
+    ABSTENTION_KIND,
+    ABSTENTION_LABEL,
     _field_contains,
     _field_priority,
     _scalar,
     analysis_samples,
     field_based_proposal,
+    validate_class_proposal,
 )
-from .models import ClassProposal
+from .models import ClassAssignment, ClassProposal, stable_id
 
 
 # Anchored shapes only. "Dilution factor", "Tissue Factor" (the coagulation protein) and
@@ -189,6 +194,56 @@ def automatic_class_proposal(
         "fields": decision["selected_fields"],
         "levels": _levels(unit, decision["selected_fields"]),
     }
+    return proposal, decision
+
+
+def abstention_record(
+    unit: dict[str, Any], purpose: str
+) -> tuple[ClassProposal | None, dict[str, Any]]:
+    """The record of an abstention, or None with the decision when a declared factor defines Class.
+
+    An abstention is saved like a proposal and needs the same confirmation: that no Class is defined
+    is the decision, and a run carries it as every sample in one Class, with the reason and the
+    factors that were considered, so the gate can ratify it and a reader can see why.
+    """
+    decision = select_class_fields(unit, purpose)
+    if decision["decision"] != "abstained":
+        return None, decision
+    # One assignment per sample, however many files it has (a sample injected twice is one sample).
+    sample_ids = list(dict.fromkeys(str(sample["sample_id"]) for sample in analysis_samples(unit)))
+    assignments = [
+        ClassAssignment(sample_id=sample_id, class_label=ABSTENTION_LABEL, values={}) for sample_id in sample_ids
+    ]
+    payload = json.dumps(
+        {"unit_id": unit["unit_id"], "purpose": purpose, "abstention": decision["reason"],
+         "samples": [item.sample_id for item in assignments]},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    proposal = ClassProposal(
+        proposal_id=stable_id("class-abstention", payload),
+        unit_id=str(unit["unit_id"]),
+        purpose=purpose,
+        selected_fields=[],
+        assignments=assignments,
+        rationale=decision["rationale"],
+        contrast_definition={
+            "kind": ABSTENTION_KIND,
+            "reason": decision["reason"],
+            "class_label": ABSTENTION_LABEL,
+            "considered": [
+                {"field": item["field"], "verdict": item["verdict"], "reason": item["reason"]}
+                for item in decision["considered"]
+            ],
+        },
+        model="catalog-declared-factor-selection",
+        prompt_hash=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        warnings=[
+            decision["notice"],
+            f"The run carries no contrast: every sample takes the one Class '{ABSTENTION_LABEL}'.",
+        ],
+    )
+    validate_class_proposal(unit, proposal)
     return proposal, decision
 
 

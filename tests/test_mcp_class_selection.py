@@ -151,7 +151,99 @@ class SavingItStillNeedsTheConfirmation(unittest.TestCase):
         self.assertFalse(result["saved"])
         self.assertEqual("no_declared_factor", result["class_selection"]["reason"])
         self.assertIn("declared no experimental factor", result["message"])
+        self.assertIn("abstain=True", result["next"])
         self.assertEqual(0, stored)
+
+    def test_an_abstention_is_recorded_only_when_asked_and_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(mixed_project(), database)
+
+            preview = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", [], "", "", abstain=True, database=database
+            )
+            with Catalog(database) as catalog:
+                after_preview = catalog.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0]
+            saved = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", [], "", "", abstain=True, confirmed=True, database=database
+            )
+            with Catalog(database) as catalog:
+                stored = catalog.get_class_proposal(saved["proposal"]["proposal_id"])
+
+        self.assertTrue(preview["confirmation_required"])
+        self.assertEqual("no_declared_factor", preview["abstention_preview"]["reason"])
+        self.assertEqual(0, after_preview, "a preview saves nothing")
+        self.assertTrue(saved["saved"])
+        self.assertTrue(saved["abstention"])
+        self.assertEqual("accepted", stored["status"])
+        self.assertEqual([], stored["selected_fields"])
+        self.assertEqual("abstention", stored["contrast_definition"]["kind"])
+        self.assertEqual("no_declared_factor", stored["contrast_definition"]["reason"])
+        self.assertEqual({"All"}, {item["class_label"] for item in stored["assignments"]})
+        self.assertIn("declared no experimental factor", stored["warnings"][0])
+        self.assertIn("carries no contrast", stored["warnings"][1])
+
+    def test_there_is_no_abstention_to_record_where_a_factor_defines_class(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(_declared_project(), database)
+
+            result = msdial_catalog_save_class_proposal(
+                unit_id, "Compare LPS against vehicle", [], "", "", abstain=True, confirmed=True,
+                database=database,
+            )
+            with Catalog(database) as catalog:
+                stored = catalog.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0]
+
+        self.assertFalse(result["saved"])
+        self.assertEqual("declared", result["class_selection"]["decision"])
+        self.assertEqual(0, stored)
+
+    def test_a_sample_injected_twice_is_one_sample(self) -> None:
+        project = copy.deepcopy(mixed_project())
+        unit = project["analysis_units"][0]
+        # MTBKS157's shape: one sample, two raw files (the second a re-injection).
+        first = unit["sample_metadata"][0]
+        duplicate = copy.deepcopy(first)
+        duplicate["raw_file"] = "young_wt_1_reinjected.raw"
+        unit["sample_metadata"].append(duplicate)
+        unit["files"].append({"name": "young_wt_1_reinjected.raw", "size_bytes": 1024, "role": "raw"})
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(project, database)
+            saved = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", [], "", "", abstain=True, confirmed=True, database=database
+            )
+
+        self.assertTrue(saved.get("saved"), saved)
+        ids = [item["sample_id"] for item in saved["proposal"]["assignments"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_an_abstention_is_never_an_agents_contrast(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(_declared_project(), database)
+            result = msdial_catalog_save_class_proposal(
+                unit_id, "Compare LPS against vehicle", [],
+                '[{"sample_id": "S1", "class_label": "All"}, {"sample_id": "S2", "class_label": "All"}]',
+                "no contrast", contrast_definition_json='{"kind": "abstention", "reason": "no_declared_factor"}',
+                confirmed=True, database=database,
+            )
+
+        self.assertFalse(result["saved"])
+        self.assertIn("abstain=True", result["message"])
+
+    def test_an_abstention_names_no_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = str(Path(temporary) / "catalog.sqlite")
+            unit_id = _ingest(mixed_project(), database)
+
+            result = msdial_catalog_save_class_proposal(
+                unit_id, "Compare genotypes", ["Genotype"], "", "", abstain=True, confirmed=True,
+                database=database,
+            )
+
+        self.assertFalse(result["saved"])
 
     def test_naming_the_fields_still_uses_them_and_nothing_else_changed(self) -> None:
         """The path a person takes is untouched: their fields, their rationale, their model."""
