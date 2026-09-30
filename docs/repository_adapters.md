@@ -45,6 +45,11 @@ against the repository file list, including vendor-directory members and SCIEX
 sidecars. ABF is used only when the SDRF provides no original vendor reference,
 and that fallback is reported.
 
+A vendor directory is stored as its member files, one row each, because each
+has its own URL and MD5. The analysis-unit view groups them again: every file
+under a `.raw` or `.d` segment is a member of that folder, and the folder is one
+analysis input matched to the SDRF row that names it (`raw/x.raw/`).
+
 Live validation: `MTBKS47` exposed polarity-switching LC-MS SDRF rows and a
 large Waters directory-file manifest. Its metadata also contains conflicting
 `untargeted` and `widely targeted` wording, so untargeted status remains unknown

@@ -12,7 +12,9 @@ so a run that cannot read the vendor format can still find it.
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from msdial_repository_catalog.class_proposal import (
     CONVERTED_SUFFIXES,
@@ -20,6 +22,8 @@ from msdial_repository_catalog.class_proposal import (
     VENDOR_RAW_SUFFIXES,
     normalize_file_roles,
 )
+
+VECTORS = Path(__file__).parent / "vectors" / "encoding_preference.v1.json"
 
 
 def _files(*paths: str) -> list[dict]:
@@ -133,6 +137,8 @@ class NoMzxmlReaderTests(unittest.TestCase):
 
     Eight campaign-eligible units hold mzXML and nothing else. Treating it as an input would queue
     a run that cannot start, and the failure would surface inside MS-DIAL rather than before it.
+    Since 2026-09-30 the campaign converts mzXML-only data to mzML, so an mzXML is marked for that
+    conversion; which converter does it is the execution layer's choice, not the Catalog's.
     """
 
     def test_mzxml_is_not_a_readable_format(self) -> None:
@@ -143,7 +149,16 @@ class NoMzxmlReaderTests(unittest.TestCase):
         """Alone, it stays the unit's only file and says what has to happen to it."""
         item = _files("raw/only.mzXML")[0]
 
-        self.assertIn("msconvert", item["requires_conversion"])
+        self.assertIn("converted to mzML", item["requires_conversion"])
+        self.assertEqual("mzML", item["conversion_target"])
+        self.assertNotIn("msconvert", item["requires_conversion"], "the converter is not the Catalog's")
+
+    def test_only_mzxml_is_marked_convertible(self) -> None:
+        """mzData and the rest have no planned route to a format MS-DIAL reads."""
+        item = _files("raw/only.mzData")[0]
+
+        self.assertTrue(item["requires_conversion"])
+        self.assertNotIn("conversion_target", item)
 
     def test_an_mzxml_loses_to_a_vendor_container(self) -> None:
         """THE MTBKS157 SHAPE: sixteen samples published as .RAW and again as .mzXML."""
@@ -161,6 +176,27 @@ class NoMzxmlReaderTests(unittest.TestCase):
         self.assertEqual("raw_alternate", roles["raw/s.mzXML"])
         demoted = next(f for f in result if f["role"] == "raw_alternate")
         self.assertIn("cannot read this format", demoted["demoted_because"])
+
+
+class SharedVectorTests(unittest.TestCase):
+    """The rule Interactive applies to files an archive held is this one; the vectors are shared."""
+
+    def test_every_vector(self) -> None:
+        document = json.loads(VECTORS.read_text(encoding="utf-8"))
+        self.assertEqual("msdial-encoding-preference-vectors.v1", document["schema"])
+        for case in document["cases"]:
+            with self.subTest(case["name"]):
+                result = {item["path"]: item for item in _files(*case["files"])}
+                self.assertEqual(case["roles"], {path: item["role"] for path, item in result.items()})
+                self.assertEqual(
+                    sorted(case.get("requires_conversion", [])),
+                    sorted(path for path, item in result.items() if item.get("requires_conversion")),
+                )
+                if "conversion_target" in case:
+                    self.assertEqual(
+                        case["conversion_target"],
+                        {path: item["conversion_target"] for path, item in result.items() if "conversion_target" in item},
+                    )
 
 
 if __name__ == "__main__":  # pragma: no cover

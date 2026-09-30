@@ -1,0 +1,86 @@
+{
+  "schema": "msdial-encoding-preference-vectors.v1",
+  "purpose": "One rule for choosing which encoding of a sample MS-DIAL analyses, with the cases both the Catalog and MS-DIAL Interactive must decide the same way. The Catalog applies it wherever a repository lists files; Interactive applies it after extraction, to files an archive held. Each case lists the paths of one unit and the role every path must end with.",
+  "rule": [
+    "Files name the same sample when their basenames match with the container suffix removed; a per-sample archive (x.d.zip, x.mzML.gz) is read as the container it unpacks to, and a vendor folder listed through its members (x.raw/_FUNC001.DAT) as the folder.",
+    "Among files of one sample, a vendor container (.raw, .d, .wiff, .wiff2, .lcd, .qgd, .abf, .ibf, .cdf, .lrp) is analysed and every other encoding becomes raw_alternate.",
+    "With no vendor container, a converted container MS-DIAL reads (.mzML, .imzML) is analysed, and a format MS-DIAL cannot read becomes raw_alternate.",
+    "Two containers of equal preference are both left in place: no preference was stated between them, and none is invented.",
+    "A .wiff2 always wins over the .wiff of the same sample, decided by the analyst on 2026-09-21.",
+    "A format MS-DIAL cannot read (.mzXML, .mzData, .mgf, .ibd, .dat, .scan) is marked requires_conversion wherever it appears; only mzXML is marked for conversion to mzML (decided by the user on 2026-09-30).",
+    "Files inside a vendor folder are its members and never compete."
+  ],
+  "cases": [
+    {
+      "name": "vendor file beats mzXML (MTBKS157)",
+      "files": ["raw/01026_Bread_nega.RAW", "raw/01026_Bread_nega.mzXML"],
+      "roles": {"raw/01026_Bread_nega.RAW": "raw", "raw/01026_Bread_nega.mzXML": "raw_alternate"},
+      "requires_conversion": ["raw/01026_Bread_nega.mzXML"]
+    },
+    {
+      "name": "vendor file beats mzML",
+      "files": ["raw/s.d", "raw/s.mzML"],
+      "roles": {"raw/s.d": "raw", "raw/s.mzML": "raw_alternate"}
+    },
+    {
+      "name": "mzML beats mzXML",
+      "files": ["raw/s.mzML", "raw/s.mzXML"],
+      "roles": {"raw/s.mzML": "raw", "raw/s.mzXML": "raw_alternate"},
+      "requires_conversion": ["raw/s.mzXML"]
+    },
+    {
+      "name": "vendor folder beats mzML",
+      "files": ["raw/s.raw/_FUNC001.DAT", "raw/s.raw/_HEADER.TXT", "raw/s.mzML"],
+      "roles": {
+        "raw/s.raw/_FUNC001.DAT": "vendor_folder_member",
+        "raw/s.raw/_HEADER.TXT": "vendor_folder_member",
+        "raw/s.mzML": "raw_alternate"
+      }
+    },
+    {
+      "name": "packed vendor container beats mzML",
+      "files": ["FILES/s.d.zip", "FILES/s.mzML"],
+      "roles": {"FILES/s.d.zip": "raw", "FILES/s.mzML": "raw_alternate"}
+    },
+    {
+      "name": "packed vendor container beats packed mzML (MTBLS243)",
+      "files": ["FILES/s.d.zip", "FILES/s.mzML.zip"],
+      "roles": {"FILES/s.d.zip": "raw", "FILES/s.mzML.zip": "raw_alternate"}
+    },
+    {
+      "name": "packed vendor container beats mgf (MTBLS1963)",
+      "files": ["FILES/s.d.zip", "FILES/s.mgf"],
+      "roles": {"FILES/s.d.zip": "raw", "FILES/s.mgf": "raw_alternate"},
+      "requires_conversion": ["FILES/s.mgf"]
+    },
+    {
+      "name": "wiff2 beats wiff",
+      "files": ["raw/s.wiff", "raw/s.wiff2"],
+      "roles": {"raw/s.wiff": "raw_alternate", "raw/s.wiff2": "raw"}
+    },
+    {
+      "name": "two vendor containers: no preference is invented",
+      "files": ["raw/s.raw", "raw/s.d"],
+      "roles": {"raw/s.raw": "raw", "raw/s.d": "raw"}
+    },
+    {
+      "name": "different samples are never paired",
+      "files": ["raw/s_01.d", "raw/s_02.mzML"],
+      "roles": {"raw/s_01.d": "raw", "raw/s_02.mzML": "raw"}
+    },
+    {
+      "name": "mzXML alone is the input, marked for conversion to mzML",
+      "files": ["raw/s.mzXML"],
+      "roles": {"raw/s.mzXML": "raw"},
+      "requires_conversion": ["raw/s.mzXML"],
+      "conversion_target": {"raw/s.mzXML": "mzML"}
+    },
+    {
+      "name": "mzData alone is the input, with no conversion planned",
+      "files": ["raw/s.mzData"],
+      "roles": {"raw/s.mzData": "raw"},
+      "requires_conversion": ["raw/s.mzData"],
+      "conversion_target": {}
+    }
+  ]
+}

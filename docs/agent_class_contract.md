@@ -50,6 +50,27 @@ workflow applies its own confirmation and bundle-aware size limits. The MCP
 response is a compact summary. Pass its `handoff_path` to Interactive rather
 than relaying or truncating the full file and sample manifests through a model.
 
+The handoff counts analysis inputs, not files (`analysis_input_model`
+`one-input-per-sample.v1`). A Waters `.raw` or an Agilent or Bruker `.d`
+folder is one input, one sample row and one Class assignment; the files
+inside it stay in `files`, with role `vendor_folder_member` and their
+`container`, because they are what is downloaded and checksummed. A per-sample
+archive such as `x.d.zip` is one input whose `path` is the container it unpacks
+to. `sample_count`, `analytical_sample_count` and
+`download_scope.analysis_file_count` equal the number of `analysis_inputs`,
+while `download_scope.file_count` still counts every file. The inputs are
+written into the handoff file and into `analysis_input_manifest_path`, and
+omitted from the response. When the listing names no input, because the data
+sit inside accession archives or the unit publishes only converted files,
+`analysis_inputs_declared` is false and the inputs are found after download.
+
+A folder named by two sample rows, a sample row whose folder is not listed, a
+listed folder that no row names, and a sample directory that is not an MS-DIAL
+container (Bruker NMR) each add an `analysis_input:<code>` blocking reason.
+Folders of more than one vendor format in one unit, such as Bruker BAF and TDF,
+only warn: the handoff carries a `split_hint` with the count of each format,
+and each input carries its `format`.
+
 When the selected fields are already reviewed, saving with an empty assignment
 array first returns a deterministic field-projection preview. Explicit
 per-sample assignments remain available for purpose-specific model decisions.

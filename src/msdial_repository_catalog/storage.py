@@ -616,10 +616,13 @@ class Catalog:
         ).fetchall()
         result = [dict(row) for row in rows]
         for item in result:
-            item["sample_count"] = self._analysis_sample_count(str(item["unit_id"]))
+            item["sample_count"], item["analysis_file_count"] = self._analysis_counts(
+                str(item["unit_id"])
+            )
         return result
 
-    def _analysis_sample_count(self, unit_id: str) -> int:
+    def _analysis_counts(self, unit_id: str) -> tuple[int, int]:
+        """The unit's sample rows and analysis inputs, as the projected view counts them."""
         from .class_proposal import normalize_analysis_unit
 
         samples = [
@@ -637,8 +640,9 @@ class Catalog:
             )
         ]
         if not files:
-            return len(samples)
-        return int(normalize_analysis_unit({"samples": samples, "files": files})["sample_count"])
+            return len(samples), 0
+        view = normalize_analysis_unit({"samples": samples, "files": files})
+        return int(view["sample_count"]), int(view["analysis_file_count"])
 
     def get_unit(self, unit_id: str) -> dict[str, Any]:
         self.initialize()

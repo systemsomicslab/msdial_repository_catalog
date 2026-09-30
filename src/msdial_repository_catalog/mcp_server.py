@@ -9,10 +9,10 @@ from typing import Any, Callable, TypeVar
 
 from .class_proposal import (
     ABSTENTION_KIND,
+    ANALYSIS_INPUT_MODEL,
     analysis_samples,
     build_class_proposal_request,
     field_based_proposal,
-    normalize_file_roles,
     validate_class_proposal,
 )
 from .class_selection import abstention_record, automatic_class_proposal, select_class_fields
@@ -171,33 +171,49 @@ def msdial_catalog_get_analysis_unit(
     sample_limit: int = 0,
     include_files: bool = False,
     file_limit: int = 0,
+    include_inputs: bool = False,
+    input_limit: int = 0,
 ) -> dict[str, Any]:
     """Return one bounded MS-DIAL-compatible analysis unit with its sample and file manifests.
 
-    Samples and files are both written beside the database and named by path
-    rather than inlined. A 200-file unit returned 57,647 characters, 99.6% of it
-    the file list, which no caller could receive.
+    Samples, files and analysis inputs are all written beside the database and
+    named by path rather than inlined. A 200-file unit returned 57,647
+    characters, 99.6% of it the file list, which no caller could receive.
     """
     database_path = _database(database)
     with Catalog(database_path) as catalog:
         unit = catalog.get_unit(unit_id)
     samples = list(unit.get("samples", []))
     files = list(unit.get("files", []))
+    inputs = list(unit.get("analysis_inputs", []))
     handoffs = database_path.parent / "handoffs"
     handoffs.mkdir(parents=True, exist_ok=True)
     sample_path = handoffs / f"{unit_id}-samples.json"
     file_path = handoffs / f"{unit_id}-files.json"
+    input_path = handoffs / f"{unit_id}-inputs.json"
     sample_path.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     file_path.write_text(
         json.dumps(files, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    input_path.write_text(
+        json.dumps(inputs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     response = dict(unit)
     response["sample_count"] = len(samples)
     response["sample_table_path"] = str(sample_path.resolve())
     response["file_count"] = len(files)
     response["file_manifest_path"] = str(file_path.resolve())
+    response["analysis_input_count"] = len(inputs)
+    response["analysis_input_manifest_path"] = str(input_path.resolve())
+    if include_inputs:
+        limit = max(0, int(input_limit))
+        response["analysis_inputs"] = inputs[:limit] if limit else inputs
+        response["analysis_inputs_truncated"] = bool(limit and len(inputs) > limit)
+    else:
+        response["analysis_inputs"] = []
+        response["analysis_inputs_omitted"] = True
     if include_samples:
         limit = max(0, int(sample_limit))
         response["samples"] = samples[:limit] if limit else samples
@@ -460,24 +476,32 @@ def msdial_catalog_reanalysis_handoff(
         blocking_reasons.append("class_proposal:other_unit")
     elif str(proposal.get("status") or "") != ACCEPTED_STATUS:
         blocking_reasons.append("class_proposal:not_accepted")
-    files = _handoff_files(unit["files"])
-    primary_files = [item for item in files if item.get("role", "raw") == "raw"]
-    analytical_samples = {
-        str(item.get("sample_id") or item.get("path") or "") for item in primary_files
-    }
+    # ONE ANALYSIS INPUT PER SAMPLE. get_unit returns the projected view, so the files, the sample
+    # rows and the analysis inputs below are one projection of the stored rows and agree with each
+    # other: a Waters folder is one input and its thirty-odd files are its members, never
+    # thirty-odd samples.
+    files = list(unit["files"])
+    inputs = list(unit.get("analysis_inputs") or [])
+    input_issues = list(unit.get("analysis_input_issues") or [])
+    blocking_reasons.extend(
+        f"analysis_input:{item['code']}" for item in input_issues if item.get("blocking")
+    )
     urls = {str(item.get("download_url") or "") for item in files if item.get("download_url")}
     bundle_level = unit["repository"] == "mb_post" or len(urls) < len(files)
-    analysis_unit = {**unit, "files": files}
-    analysis_rows = analysis_samples(analysis_unit)
+    analysis_rows = list(unit["samples"])
     samples, unit_attributes = _compact_sample_metadata(analysis_rows)
     sample_path = database_path.parent / "handoffs" / f"{unit_id}-samples.json"
     file_path = database_path.parent / "handoffs" / f"{unit_id}-files.json"
+    input_path = database_path.parent / "handoffs" / f"{unit_id}-inputs.json"
     sample_path.parent.mkdir(parents=True, exist_ok=True)
     sample_path.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     file_path.write_text(
         json.dumps(files, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    input_path.write_text(
+        json.dumps(inputs, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     payload = {
         "schema": "msdial-repository-reanalysis-handoff.v1",
@@ -505,7 +529,7 @@ def msdial_catalog_reanalysis_handoff(
             "allowlist_required": bundle_level,
             "allowlist_keys": ["path", "checksum"],
             "file_count": len(files),
-            "analysis_file_count": len(primary_files),
+            "analysis_file_count": len(inputs),
             "total_file_bytes": sum(int(item.get("size_bytes") or 0) for item in files),
             "bundle_bytes": scope["bundle_bytes"],
             "bundle_shared_unit_count": scope["bundle_shared_unit_count"],
@@ -517,7 +541,23 @@ def msdial_catalog_reanalysis_handoff(
             ),
         },
         "sample_count": len(analysis_rows),
-        "analytical_sample_count": len(analytical_samples),
+        "analytical_sample_count": len(inputs),
+        # Additive on v1. `files` still lists every file to download, folder members included, and
+        # file_count counts them; analysis_inputs lists what MS-DIAL opens, one per sample row. It is
+        # declared only when the listing names the inputs: a unit whose data sit inside accession
+        # archives, or that publishes only converted files, finds its inputs after the download.
+        "analysis_input_model": ANALYSIS_INPUT_MODEL,
+        "analysis_inputs_declared": bool(inputs),
+        "analysis_input_count": len(inputs),
+        "analysis_inputs": inputs,
+        "analysis_input_manifest_path": str(input_path.resolve()),
+        "analysis_input_issues": input_issues,
+        "split_hint": unit.get("split_hint"),
+        "warnings": [
+            f"analysis_input:{item['code']}: {item['message']}"
+            for item in input_issues
+            if not item.get("blocking")
+        ],
         "unit_attributes": unit_attributes,
         "sample_table_path": str(sample_path.resolve()),
         "sample_metadata": samples,
@@ -527,7 +567,10 @@ def msdial_catalog_reanalysis_handoff(
         "blocking_reasons": blocking_reasons,
         "ready_for_download_planning": not blocking_reasons,
         "next_action": (
-            "Pass this handoff to MS-DIAL Interactive for bounded download planning."
+            "The sample table and the file listing disagree about the analysis inputs; see "
+            "analysis_input_issues."
+            if any(item.get("blocking") for item in input_issues)
+            else "Pass this handoff to MS-DIAL Interactive for bounded download planning."
             if not required_review and proposal is not None
             else "Resolve required technical metadata and confirm a Class proposal first."
         ),
@@ -543,6 +586,8 @@ def msdial_catalog_reanalysis_handoff(
     response["sample_metadata_omitted"] = True
     response["files"] = []
     response["files_omitted"] = True
+    response["analysis_inputs"] = []
+    response["analysis_inputs_omitted"] = True
     return response
 
 
@@ -585,10 +630,6 @@ def _compact_sample_metadata(
         for sample in samples
     ]
     return compact, constants
-
-
-def _handoff_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return normalize_file_roles(files)
 
 
 def main() -> None:
