@@ -14,15 +14,44 @@
 | `sample_context` | Derived context with evidence and confidence |
 | `analysis_unit_context` | Study/assay-level topics that must not be assigned to each sample |
 | `publication` | DOI, PubMed ID, and citation title |
-| `class_proposal` | Purpose-specific grouping and contrast decision |
+| `class_proposal` | Purpose-specific grouping and contrast decision, and the campaign approval that ratified it (`ratified_by`, `ratification_json`) |
 | `class_assignment` | One proposed MS-DIAL Class value per sample |
 | `crawl_run` | Incremental update provenance and failures |
 | `manual_override` | Reviewed local correction without mutating repository source |
-| `analysis_run` | Reanalysis provenance, software versions, parameter hash, mzTab-M checksum |
+| `analysis_run` | One production run: status, gate verdict and exit code, software versions, parameter hash, mzTab-M checksum, output paths relative to the workspace, timestamps |
 | `contrast` | Explicit case/control/covariate definition for one analysis purpose |
 | `metabolite_entity` | Cross-study chemical identity and structural identifiers |
 | `metabolite_observation` | Dataset-specific MS-DIAL feature and annotation evidence |
 | `metabolite_response` | Effect direction and statistics for one contrast |
+
+## Schema 3
+
+Schema 3 adds, additively:
+
+- `class_proposal.ratified_by` and `ratification_json`: the campaign approval
+  that stood in for the confirmation of a proposal or an abstention
+  ([Agent Class contract](agent_class_contract.md)). Proposals saved earlier
+  read unratified.
+- `analysis_run.status`, `gate_verdict`, `gate_exit_code`, `output_paths_json`,
+  `recorded_at` and `updated_at`, which `Catalog.record_analysis_run` (MCP
+  `msdial_catalog_record_analysis_run`) writes. The write is idempotent on
+  `run_id`, `<unit>[-part]:<production_job_id>`, and `unit_id` is the catalog
+  unit, the parent of a split part. Paths are relative to the unit's workspace
+  and no value may hold an absolute location. `completed` is reserved for a
+  gate `--strict` exit 0.
+
+A schema-1 or schema-2 database migrates on first open; a Catalog older than
+schema 3 then refuses the database.
+
+## Catalog updates and local records
+
+A catalog update deletes the units an adapter no longer produces, including a
+unit whose technical signature changed, which returns under a new `unit_id`.
+The deletion cascades to that unit's Class proposals, assignments and run
+records. A unit that keeps its id keeps them, but its sample and file rows are
+rewritten. `storage.Catalog.ingest_study` documents the cascade. While a
+campaign holds the catalog (`campaign.lock` beside the database), every update
+path refuses ([Scheduled updates](scheduled_updates.md)).
 
 ## Technical signature
 

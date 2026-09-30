@@ -168,7 +168,15 @@ analysis execution.
 Agents can also start, observe, and cancel catalog metadata updates with
 `msdial_catalog_update_start`, `msdial_catalog_update_status`, and
 `msdial_catalog_update_cancel`. Starting requires explicit confirmation because
-it contacts public services. See [Scheduled updates](docs/scheduled_updates.md).
+it contacts public services, and is refused while a reanalysis campaign holds
+the catalog. See [Scheduled updates](docs/scheduled_updates.md).
+
+A campaign saves Class decisions under its recorded approval
+(`msdial_catalog_save_class_proposal` with a `ratification`), records each run
+with `msdial_catalog_record_analysis_run`, and plans downloads with
+`Catalog.download_plan`, which counts each repository object once and names
+every unit that needs it. See [Agent Class contract](docs/agent_class_contract.md)
+and [Schema](docs/schema.md).
 
 ## Repository adapters
 

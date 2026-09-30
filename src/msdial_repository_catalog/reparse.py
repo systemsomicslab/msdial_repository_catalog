@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .adapters import native_adapter
+from .campaign_lock import CampaignLockedError, refuse_while_campaign_locked
 from .normalize import project_to_study
 from .storage import Catalog
 
@@ -59,6 +60,7 @@ def reparse_repository(
     progress: Callable[[str, int, int], None] | None = None,
 ) -> ReparseSummary:
     """Rebuild every stored study of one repository through its adapter's local re-parse."""
+    refuse_while_campaign_locked(catalog.path, f"a {repository} re-parse")
     summary = ReparseSummary(repository=repository)
     adapter = native_adapter(repository)
     reparse = getattr(adapter, "reparse_units", None)
@@ -85,6 +87,8 @@ def reparse_repository(
             study = project_to_study(rebuilt, parser_version)
             catalog.ingest_study(study)
             summary.reparsed += 1
+        except CampaignLockedError:
+            raise
         except Exception as error:  # One unreadable stored record must not stop the pass.
             summary.failed += 1
             summary.failures.append({"accession": accession, "error": str(error)})

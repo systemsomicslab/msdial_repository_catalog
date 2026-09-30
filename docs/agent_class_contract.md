@@ -34,6 +34,31 @@ The accepted proposal records model identity and prompt hash. Re-running an
 agent creates a new proposal; it does not mutate the repository metadata or the
 previous decision.
 
+## Ratification by a campaign approval
+
+Saving a proposal or an abstention is confirmation boundary 3. In a campaign,
+one approval of one campaign manifest digest (MS-DIAL Interactive's
+`msdial-campaign-authorization.v1` record) stands in for the per-unit
+confirmation. `msdial_catalog_save_class_proposal` then takes a `ratification`
+instead of `confirmed=true`:
+
+```json
+{"approval_id": "...", "manifest_digest": "sha256:<64 lowercase hex>",
+ "authorization_sha256": "<optional>", "campaign_id": "<optional>",
+ "proposal_id": "<optional: the Class digest the approved manifest names>"}
+```
+
+A ratified save needs no confirmation, for a proposal and an abstention alike.
+The ratification is stored with the proposal (`ratified_by` is the approval id,
+`ratification_json` the full record, boundary 3) and returned by the save, by
+`get_class_proposal` and in the handoff's `class_proposal`. A ratification
+without the approval id or the digest, with a digest in any other form, with
+keys other than these, or naming a different `proposal_id` is refused and
+saves nothing, even with `confirmed=true`. The Catalog records the approval; it
+does not read the authorization record, which the campaign runner validates.
+Without a ratification nothing changed: saving still needs `confirmed=true`,
+and a proposal confirmed in a conversation reads `ratification: null`.
+
 ## MCP integration
 
 The initial MCP surface exposes:
@@ -44,11 +69,30 @@ The initial MCP surface exposes:
 - `msdial_catalog_class_request`
 - `msdial_catalog_save_class_proposal`
 - `msdial_catalog_reanalysis_handoff`
+- `msdial_catalog_record_analysis_run`
 
 The handoff never downloads raw data; the receiving MS-DIAL Interactive
 workflow applies its own confirmation and bundle-aware size limits. The MCP
 response is a compact summary. Pass its `handoff_path` to Interactive rather
 than relaying or truncating the full file and sample manifests through a model.
+
+`download_scope.objects` in the handoff file lists one object per download URL,
+as a download store holds it: its `name` (`<accession>.tar` for MB-POST, the
+URL's last path segment otherwise), `kind`, `bytes`, `size_known`, declared
+`checksum` and `checksum_algorithm`, and `consumer_unit_ids`, every unit that
+lists the URL across polarities and units of the accession. A size the listings
+do not state, which includes every size listed as 0, is `bytes: null`, never 0.
+`bundle_size_known` is false when any object's size is not stated, a URL is
+not indexed, a file carries no URL (`files_without_url`), or the unit lists no
+file at all; `bundle_bytes` then counts only stated sizes and is a lower bound.
+MetaboBank lists Bruker `.d` marker files at 0 with the MD5 of zero bytes: they
+are still of unknown size, and `empty_digest_paths` per object (and
+`empty_digest_object_count`) reports them apart, for a disk guard whose policy
+on unknown sizes accepts that checksum. The objects are omitted from the MCP
+response. A campaign planner reads the same objects for many units through
+`Catalog.download_plan`, or `storage.download_plan` on a read-only connection;
+there a unit's `size_known` follows the same rule, and `units_of_unknown_size`
+counts the units it is false for.
 
 The handoff counts analysis inputs, not files (`analysis_input_model`
 `one-input-per-sample.v1`). A Waters `.raw` or an Agilent or Bruker `.d`

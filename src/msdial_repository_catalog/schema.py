@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 BASE_SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -172,7 +172,9 @@ CREATE TABLE IF NOT EXISTS class_proposal (
     prompt_hash TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'proposed',
     warnings_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    ratified_by TEXT NOT NULL DEFAULT '',
+    ratification_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS class_assignment (
@@ -210,7 +212,13 @@ CREATE TABLE IF NOT EXISTS analysis_run (
     qa_status TEXT NOT NULL DEFAULT 'not_evaluated',
     started_at TEXT NOT NULL DEFAULT '',
     completed_at TEXT NOT NULL DEFAULT '',
-    provenance_json TEXT NOT NULL DEFAULT '{}'
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT '',
+    gate_verdict TEXT NOT NULL DEFAULT '',
+    gate_exit_code INTEGER,
+    output_paths_json TEXT NOT NULL DEFAULT '{}',
+    recorded_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS contrast (
