@@ -63,6 +63,33 @@ Example weekly discovery at 03:00 on Sunday:
 Use an operating-system lock (`flock` on Linux) when another process may update
 the same SQLite file.
 
+## Campaign lock
+
+A reanalysis campaign holds the catalog with `campaign.lock` in the database's
+directory, naming its approval id and process. While the file exists every
+update refuses: `msdial_catalog_update_start`, the update job (a job already
+running stops at its next accession), `crawl`, `crawl-interactive`,
+`ingest-json` and `reparse`. An update would otherwise delete a unit whose
+signature changed, with its ratified Class proposal and run records, and rewrite
+the samples of the units that remain.
+
+`campaign_lock.acquire_campaign_lock(database, approval_id)` takes the lock and
+`release_campaign_lock(database, approval_id)` removes it. Acquire returns only
+once no catalog write is in flight: every upsert reads the lock again inside
+its write transaction, and acquire takes SQLite's write lock after creating the
+file, so an upsert that was already writing commits first and any later one
+refuses. A write that holds the database for more than ten minutes
+(`write_wait_seconds`) leaves no lock: acquire removes its file and refuses.
+`crawls_marked_running` in the result counts crawl runs still marked running;
+it is reported, not refused on, because a job that died leaves its row running.
+
+The owner's liveness is read through psutil or OpenProcess, never `os.kill`. A
+lock whose owner has died is reported as stale (`msdial_catalog_status` shows
+it) and still refuses updates until the campaign releases it by its approval
+id; nothing removes it on its own. An owner on another host, or a lock file
+that cannot be read, needs `force=True`; a live owner in another process is
+never overruled.
+
 ## Claude, Cowork, and Codex
 
 An MCP client can call `msdial_catalog_update_start` with `confirmed=true`, then

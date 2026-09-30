@@ -184,7 +184,30 @@ class ARunRecordSaysOnlyWhatItMay(RunRecordFixture):
         self.assertIn("gate --strict exited 0", refused["message"])
 
 
-class RunRecordsAreLocalDecisions(RunRecordFixture):
+class TheUpsertCascadeIsWhatStorageSaysItIs(RunRecordFixture):
+    def test_a_unit_the_update_drops_takes_its_proposal_and_run_record_with_it(self) -> None:
+        self.record()
+        project = mixed_project()
+        project["analysis_units"][0]["instrument"] = "another instrument string"
+        with Catalog(self.database) as catalog:
+            catalog.ingest_study(project_to_study(project))
+            proposals = catalog.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0]
+            runs = catalog.connection.execute("SELECT COUNT(*) FROM analysis_run").fetchone()[0]
+            units = {row[0] for row in catalog.connection.execute("SELECT unit_id FROM analysis_unit")}
+
+        self.assertNotIn(self.unit_id, units, "a changed signature is a new unit id")
+        self.assertEqual((0, 0), (proposals, runs))
+
+    def test_a_unit_that_keeps_its_id_keeps_them(self) -> None:
+        self.record()
+        with Catalog(self.database) as catalog:
+            catalog.ingest_study(project_to_study(mixed_project()))
+            run = catalog.get_analysis_run(self.run_id)
+            proposal = catalog.get_class_proposal(self.proposal_id)
+
+        self.assertEqual(self.proposal_id, proposal["proposal_id"])
+        self.assertEqual("running", run["status"])
+
     def test_run_records_leave_a_snapshot_only_with_the_local_decisions(self) -> None:
         self.record()
         counts = []

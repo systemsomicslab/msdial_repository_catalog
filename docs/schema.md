@@ -43,6 +43,16 @@ Schema 3 adds, additively:
 A schema-1 or schema-2 database migrates on first open; a Catalog older than
 schema 3 then refuses the database.
 
+## Catalog updates and local records
+
+A catalog update deletes the units an adapter no longer produces, including a
+unit whose technical signature changed, which returns under a new `unit_id`.
+The deletion cascades to that unit's Class proposals, assignments and run
+records. A unit that keeps its id keeps them, but its sample and file rows are
+rewritten. `storage.Catalog.ingest_study` documents the cascade. While a
+campaign holds the catalog (`campaign.lock` beside the database), every update
+path refuses ([Scheduled updates](scheduled_updates.md)).
+
 ## Technical signature
 
 Each analysis unit records:

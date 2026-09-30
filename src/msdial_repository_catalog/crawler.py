@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from .campaign_lock import CampaignLockedError, refuse_while_campaign_locked
 from .models import StudyRecord, stable_id
 from .normalize import project_to_study
 from .storage import Catalog
@@ -44,6 +45,8 @@ class CatalogCrawler:
         progress: Callable[[dict[str, Any]], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> CrawlSummary:
+        # Refused before the repository is contacted; ingest_study refuses again for each study.
+        refuse_while_campaign_locked(self.catalog.path, f"a {adapter.name} crawl")
         _notify(progress, {"stage": "discovering", "repository": adapter.name})
         selected = list(accessions if accessions is not None else adapter.list_accessions())
         if exclude_accessions:
@@ -79,6 +82,11 @@ class CatalogCrawler:
                     else:
                         self.catalog.ingest_study(study)
                         summary.hydrated += 1
+                except CampaignLockedError:
+                    # A campaign took the lock mid-crawl: stop, rather than fail every record, and
+                    # let the crawl_run row say it was cut short.
+                    summary.cancelled = True
+                    raise
                 except Exception as error:  # One broken public record must not stop a crawl.
                     summary.failed += 1
                     summary.failures.append({"accession": accession, "error": str(error)})

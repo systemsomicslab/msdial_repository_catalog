@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .campaign_lock import CampaignLockedError, campaign_lock_status
 from .class_proposal import (
     ABSTENTION_KIND,
     ANALYSIS_INPUT_MODEL,
@@ -59,9 +60,9 @@ def _update_manager(database: str = "") -> UpdateJobManager:
 
 @tool()
 def msdial_catalog_status(database: str = "") -> dict[str, Any]:
-    """Report the local catalog path, schema, and indexed record counts."""
+    """Report the local catalog path, schema, indexed record counts, and any campaign lock."""
     with Catalog(_database(database)) as catalog:
-        return catalog.stats()
+        return {**catalog.stats(), "campaign_lock": campaign_lock_status(catalog.path)}
 
 
 @tool()
@@ -72,8 +73,28 @@ def msdial_catalog_update_start(
     confirmed: bool = False,
     database: str = "",
 ) -> dict[str, Any]:
-    """Start a metadata-only catalog update; public repository services are contacted."""
+    """Start a metadata-only catalog update; public repository services are contacted.
+
+    Refused while a campaign lock exists beside the database, stale or not: an update rewrites the
+    rows a running campaign's approved Class proposals and run records depend on.
+    """
     selected = repositories or list(REPOSITORIES)
+
+    def refused(report: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "started": False,
+            "refused": "campaign_lock",
+            "campaign_lock": report,
+            "message": (
+                f"A catalog update is refused while a campaign holds this catalog. {report.get('message', '')}"
+            ),
+            "repositories": selected,
+            "mode": mode,
+        }
+
+    lock = campaign_lock_status(_database(database))
+    if lock["locked"]:
+        return refused(lock)
     if not confirmed:
         return {
             "confirmation_required": True,
@@ -85,7 +106,10 @@ def msdial_catalog_update_start(
             "mode": mode,
             "limit": limit,
         }
-    return _update_manager(database).start(selected, mode=mode, limit=limit)
+    try:
+        return _update_manager(database).start(selected, mode=mode, limit=limit)
+    except CampaignLockedError as error:  # Taken between the check above and the start.
+        return refused(error.report)
 
 
 @tool()

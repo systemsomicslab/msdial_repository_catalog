@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .adapters import NATIVE_ADAPTERS, native_adapter
+from .campaign_lock import CampaignLockedError, campaign_lock_status, refuse_while_campaign_locked
 from .crawler import CatalogCrawler
 from .storage import Catalog
 
@@ -58,6 +59,8 @@ class UpdateJobManager:
         with self._lock:
             if self._state["state"] in ACTIVE_STATES:
                 raise RuntimeError("A catalog update is already running.")
+            # Before any repository service is contacted. A stale lock refuses too: see campaign_lock.
+            refuse_while_campaign_locked(self.database, "a catalog update")
             self._cancel = threading.Event()
             self._started_monotonic = time.monotonic()
             now = _utc_now()
@@ -119,12 +122,24 @@ class UpdateJobManager:
             thread.join(timeout)
         return self.status()
 
+    def _stop_requested(self) -> bool:
+        """A cancellation, or a campaign lock taken while the update runs, which stops it the same way."""
+        if self._cancel.is_set():
+            return True
+        report = campaign_lock_status(self.database)
+        if report["locked"]:
+            with self._lock:
+                self._state["campaign_lock"] = report
+            self._cancel.set()
+            return True
+        return False
+
     def _run(self, repositories: list[str], mode: str, limit: int | None) -> None:
         totals = {"hydrated": 0, "unchanged": 0, "failed": 0}
         try:
             self._set(state="running", stage="starting", message="Catalog update started.")
             for position, repository in enumerate(repositories, start=1):
-                if self._cancel.is_set():
+                if self._stop_requested():
                     break
                 with Catalog(self.database) as catalog:
                     indexed_accessions = catalog.accessions(repository)
@@ -168,7 +183,7 @@ class UpdateJobManager:
                         exclude_accessions=excluded,
                         limit=limit,
                         progress=lambda event, p=position: self._on_progress(event, p),
-                        cancel_requested=self._cancel.is_set,
+                        cancel_requested=self._stop_requested,
                     )
                 for key in totals:
                     totals[key] += int(getattr(summary, key))
@@ -182,7 +197,13 @@ class UpdateJobManager:
                 if summary.cancelled:
                     break
 
-            if self._cancel.is_set():
+            if self._state.get("campaign_lock"):
+                final_state = "cancelled"
+                message = (
+                    "Catalog update stopped: a campaign lock was taken while it ran. "
+                    + str(self._state["campaign_lock"].get("message") or "")
+                )
+            elif self._cancel.is_set():
                 final_state = "cancelled"
                 message = "Catalog update cancelled."
             elif totals["failed"]:
@@ -192,6 +213,11 @@ class UpdateJobManager:
                 final_state = "completed"
                 message = "Catalog update completed."
             self._finish(final_state, message)
+        except CampaignLockedError as error:
+            # The lock appeared between the last check and an upsert, which refused it.
+            with self._lock:
+                self._state["campaign_lock"] = error.report
+            self._finish("cancelled", f"Catalog update stopped: {error}")
         except Exception as error:
             self._append_log(f"Update failed: {error}")
             self._finish("failed", f"Catalog update failed: {error}")

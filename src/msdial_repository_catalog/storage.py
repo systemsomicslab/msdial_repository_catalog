@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .campaign_lock import refuse_while_campaign_locked
 from .context import context_values, normalize_field_name, normalize_value
 from .models import ClassProposal, StudyRecord, stable_id
 from .ratification import ACCEPTED_STATUS, ratification_record
@@ -235,11 +236,23 @@ class Catalog:
         }
 
     def ingest_study(self, study: StudyRecord) -> dict[str, int | str]:
+        # Every catalog update reaches the database through here -- the update job, both crawl
+        # commands, ingest-json and reparse -- so this is where a campaign lock is enforced; the
+        # callers check earlier only so that a refused update contacts no repository service.
+        action = f"the upsert of {study.repository} / {study.accession}"
+        refuse_while_campaign_locked(self.path, action)
         self.initialize()
         source_hash = study.source_hash()
         source_payload_json = _json(study.source_payload)
         snapshot_id = stable_id(study.study_id, source_hash, study.parser_version)
         with self.connection:
+            # The write lock first, then the campaign lock read again under it. acquire_campaign_lock
+            # takes this same write lock once its file exists, so an upsert that passes the check
+            # below commits before acquire returns, and one that reaches it later sees the file and
+            # refuses. The read above cannot promise that: a campaign can start between it and the
+            # commit.
+            self.connection.execute("BEGIN IMMEDIATE")
+            refuse_while_campaign_locked(self.path, action)
             self._store_source_blob(source_hash, source_payload_json)
             self.connection.execute(
                 """
@@ -295,6 +308,27 @@ class Catalog:
                     ),
                 )
 
+            # THE UPSERT CASCADE: WHAT AN UPDATE DOES TO LOCAL DECISIONS AND RUN RECORDS.
+            #
+            # A unit_id is stable_id(repository, accession, source subrecord, technical signature), so
+            # it survives a re-crawl only while every technical field reads the same.
+            #
+            # 1. A unit the adapter no longer produces -- including one whose signature changed, which
+            #    comes back under a new unit_id -- is deleted below, and ON DELETE CASCADE takes with it
+            #    its class_proposal rows (ratified ones included) with their class_assignment rows, and
+            #    its analysis_run rows with their contrast, metabolite_observation and
+            #    metabolite_response rows. The new unit starts with no proposal and no run record.
+            # 2. A unit that keeps its id is updated in place (_ingest_unit): its class_proposal and
+            #    analysis_run rows survive, but its sample and raw_file rows are deleted and rewritten.
+            #    class_assignment names samples by sample_id text, so a saved assignment can outlive the
+            #    sample it names, and a proposal id is a hash of the proposal payload, so the proposal a
+            #    campaign approved by digest may no longer be the one Class selection would build now.
+            #    Nothing here re-validates a saved proposal; the handoff reads it as it was saved.
+            # 3. analysis_run.class_proposal_id is ON DELETE SET NULL, but a proposal only disappears
+            #    with its unit, which takes the run record too, so in practice it is never nulled.
+            #
+            # That is why a catalog update refuses while a campaign lock exists (campaign_lock.py), and
+            # why a campaign copies its handoffs rather than re-reading the catalog mid-run.
             incoming_units = {unit.unit_id for unit in study.analysis_units}
             existing_units = {
                 str(row["unit_id"])
