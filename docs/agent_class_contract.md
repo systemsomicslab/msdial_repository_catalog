@@ -81,14 +81,19 @@ as a download store holds it: its `name` (`<accession>.tar` for MB-POST, the
 URL's last path segment otherwise), `kind`, `bytes`, `size_known`, declared
 `checksum` and `checksum_algorithm`, and `consumer_unit_ids`, every unit that
 lists the URL across polarities and units of the accession. A size the listings
-do not state, which includes every size listed as 0, is `bytes: null`, never 0.
-`bundle_size_known` is false when any object's size is not stated, a URL is
+do not state, which includes a size listed as 0, is `bytes: null`, never 0.
+The one exception is a file listed at 0 whose declared checksum is the digest
+of empty content (MD5 `d41d8cd98f00b204e9800998ecf8427e`, SHA-1
+`da39a3ee5e6b4b0d3255bfef95601890afd80709` or SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`), with no
+other checksum declared for it: since 2026-09-30 that file is a known 0 bytes.
+MetaboBank lists Bruker `.d` marker files that way. `empty_digest_paths` per
+object, and `empty_digest_object_count`, count the files and objects known
+empty by digest; a 0 with no checksum, or with any other, stays unknown.
+`bundle_size_known` is false when any object's size is not known, a URL is
 not indexed, a file carries no URL (`files_without_url`), or the unit lists no
 file at all; `bundle_bytes` then counts only stated sizes and is a lower bound.
-MetaboBank lists Bruker `.d` marker files at 0 with the MD5 of zero bytes: they
-are still of unknown size, and `empty_digest_paths` per object (and
-`empty_digest_object_count`) reports them apart, for a disk guard whose policy
-on unknown sizes accepts that checksum. The objects are omitted from the MCP
+The objects are omitted from the MCP
 response. A campaign planner reads the same objects for many units through
 `Catalog.download_plan`, or `storage.download_plan` on a read-only connection;
 there a unit's `size_known` follows the same rule, and `units_of_unknown_size`
@@ -103,7 +108,16 @@ archive such as `x.d.zip` is one input whose `path` is the container it unpacks
 to, and a packed file is read as the file it unpacks to (`unpacks_to`), so
 `x.wiff.scan.zip` is a sidecar and `x.mzXML.lzma` an mzXML to convert. A
 container listed both unpacked and as its own archive is analysed unpacked, and
-the archive becomes `raw_alternate`. `analytical_sample_count` and
+the archive becomes `raw_alternate`. Of several encodings of one sample, whose
+basenames match with the container suffix removed, one is analysed and the
+rest become `raw_alternate`: a vendor container or folder first, then an mzML
+or imzML, then an mzXML, which is converted to mzML. A format MS-DIAL cannot
+read and nothing converts (`.dat`, `.mzData`, `.mgf`) therefore loses to an
+mzXML of the same sample (decided 2026-09-30; MTBLS688 lists `x.mzXML.lzma`
+beside `x.dat`), and two encodings of equal rank are both left. A sample row
+that names a demoted encoding names the sample of the one analysed, when that
+one is the only encoding left and no row names it. The full rule and its cases
+are `tests/vectors/encoding_preference.v1.json`. `analytical_sample_count` and
 `download_scope.analysis_file_count` count the `analysis_inputs`;
 `sample_count` counts the sample rows, and equals that count when
 `analysis_inputs_declared` is true and no `analysis_input` issue blocks. A

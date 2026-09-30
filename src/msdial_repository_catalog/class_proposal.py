@@ -256,7 +256,8 @@ CONVERTED_SUFFIXES: tuple[str, ...] = (".mzml", ".imzml")
 # the readers confirmed it on 2026-09-21, so listing one as an input would queue a run that cannot
 # start. mzXML is the one the campaign converts: on 2026-09-30 the user decided that mzXML-only
 # data are converted to mzML, so it is marked convertible, and which converter does it is the
-# execution layer's choice rather than the Catalog's. The rest have no planned route to mzML.
+# execution layer's choice rather than the Catalog's. The rest have no planned route to mzML, so an
+# mzXML of the same sample outranks them (_prefer_one_container_per_sample).
 UNREADABLE_SUFFIXES: tuple[str, ...] = (".mzxml", ".mzdata", ".mgf", ".ibd", ".dat", ".scan")
 CONVERTIBLE_SUFFIXES: tuple[str, ...] = (".mzxml",)
 
@@ -484,13 +485,14 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
         rows = [row for row in rows if _directory_row_key(row) not in parents]
         declared = {key: path for key, path in declared.items() if key not in parents}
     groups = _group_members(files, declared, named)
-    _prefer_one_container_per_sample(
+    twins = _prefer_one_container_per_sample(
         files, [group["path"] for group in groups.values() if group["kind"] == "vendor_folder"]
     )
 
     inputs: list[dict[str, Any]] = []
     members: dict[int, list[dict[str, Any]]] = {}
     sources: dict[int, str] = {}
+    alternates: dict[int, list[str]] = {}
     seen: set[str] = set()
     for item in files:
         role = item["role"]
@@ -519,8 +521,9 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
         inputs.append(entry)
         members[id(entry)] = listed
         sources[id(entry)] = source
+        alternates[id(entry)] = twins.get(_slashes(source).casefold(), [])
 
-    samples, issues = _attribute_samples(rows, inputs, members, sources, files)
+    samples, issues = _attribute_samples(rows, inputs, members, sources, files, alternates)
     _resolve_file_samples(files, inputs, members, keep_declared=not rows)
     issues.extend(_format_issues(inputs))
     if excluded:
@@ -726,8 +729,13 @@ def _attribute_samples(
     members: dict[int, list[dict[str, Any]]],
     sources: dict[int, str],
     files: list[dict[str, Any]],
+    alternates: dict[int, list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Give each analysis input the sample row that names it, and say where the two disagree."""
+    """Give each analysis input the sample row that names it, and say where the two disagree.
+
+    `alternates` holds, per input, the encodings of its sample demoted in its favour. A row that
+    names one of them names the input's sample when no row names the input itself.
+    """
     if not inputs:
         return rows, []
     exact: dict[str, list[int]] = defaultdict(list)
@@ -758,8 +766,18 @@ def _attribute_samples(
         keys = [_match_key(entry["path"])]
         if entry.get("archive"):
             keys.append(_match_key(entry["archive"]))
-        keys_of.append(keys)
-        claimed = [index for key in keys for index in exact.get(key, ()) if index not in used]
+        # THE ROW MAY NAME THE ENCODING THAT LOST. MTBLS688's rows name x.dat, and the
+        # x.mzXML.lzma beside it is what is analysed: without this, its rows and their Factor
+        # Values would be dropped for rows the projection invents. The demoted path is no other
+        # input's, so it is as exact as the input's own, but it is read only when no row names
+        # the input itself.
+        twin_keys = [_match_key(path) for path in (alternates or {}).get(id(entry), ())]
+        keys_of.append(keys + twin_keys)
+        claimed = []
+        for candidates in (keys, twin_keys):
+            claimed = [index for key in candidates for index in exact.get(key, ()) if index not in used]
+            if claimed:
+                break
         claimed = list(dict.fromkeys(claimed))
         if entry["kind"] not in _CONTAINER_KINDS:
             # One file, one row: a second row naming the same file is not a second injection.
@@ -1033,7 +1051,7 @@ def _split_hint(issues: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def _prefer_one_container_per_sample(
     files: list[dict[str, Any]], folders: list[str] | None = None
-) -> None:
+) -> dict[str, list[str]]:
     """Leave exactly one analysable container per sample, demoting the rest to raw_alternate.
 
     WHAT THIS ENDS. MetaboBank MTBKS157 publishes each of its sixteen samples twice, once as .RAW
@@ -1047,17 +1065,27 @@ def _prefer_one_container_per_sample(
     (`folders`, whose members are listed rather than the folder) competes as the vendor container
     it is, so an x.mzML published beside an x.raw/ folder is the alternate.
 
-    The .wiff/.wiff2 pair is decided separately and earlier, in _file_role: .wiff2 is demoted when
-    a .wiff for the same sample exists. That default is right for every acquisition except SCIEX
-    ZT Scan DIA, where the .wiff2 is the one to read -- and nothing in repository metadata
-    establishes that an acquisition was ZT Scan DIA, so it is not guessed at here. Resolving it
-    needs the .wiff2 header, which only the raw-header preflight can read.
+    AN MZXML OUTRANKS A FORMAT WITH NO ROUTE. With neither a vendor container nor a converted one
+    for the sample, an mzXML, which the campaign converts to mzML, is analysed, and a format
+    MS-DIAL cannot read and nothing converts (.dat, .mzData, .mgf) is the alternate, as the user
+    decided on 2026-09-30. MetaboLights MTBLS688 lists most of its samples as x.mzXML.lzma and
+    again as x.dat, and both were inputs: one to convert, one no run could open. Since this rule
+    applies only where no vendor or converted container competes, it never demotes either.
+
+    The .wiff/.wiff2 pair is decided separately and earlier, in _file_role: the .wiff is demoted
+    when a .wiff2 for the same sample exists, for every acquisition, as the analyst decided on
+    2026-09-21.
 
     ONE CONTAINER, LISTED TWICE. A vendor folder enumerated member by member beside its own
     archive (raw/x.raw/... and raw/x.raw.zip), or a file beside its own archive (x.mzML and
     x.mzML.gz), is one container at one path, and gave two inputs of that path. The two are of
     equal preference by kind, so this is decided first: the one listed unpacked is analysed, and
     the archive is the download alternative.
+
+    Returns the paths demoted in favour of each container left alone in its sample's group, keyed
+    by that container's path, casefolded: a sample row naming one of them names that container's
+    sample, and MTBLS688's rows name the .dat. Where two containers are left, none is returned,
+    because which of them the row meant is not stated.
     """
     by_stem: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in folders or []:
@@ -1069,6 +1097,7 @@ def _prefer_one_container_per_sample(
         path = _file_path(item)
         if _container_kind(path):
             by_stem[_container_stem(path)].append(item)
+    twins: dict[str, list[str]] = {}
     for _stem, group in by_stem.items():
         unpacked = {
             _slashes(_file_path(item)).casefold()
@@ -1086,8 +1115,7 @@ def _prefer_one_container_per_sample(
         # that cannot start.
         for item in group:
             if kinds[id(item)] == "unreadable":
-                path = archived_container_of(_file_path(item)) or _file_path(item)
-                if path.casefold().endswith(CONVERTIBLE_SUFFIXES):
+                if _is_convertible(_file_path(item)):
                     item["requires_conversion"] = (
                         "MS-DIAL has no reader for this format; it must be converted to mzML "
                         "before it is analysed"
@@ -1099,24 +1127,39 @@ def _prefer_one_container_per_sample(
                         "is planned"
                     )
         competing = [item for item in group if item["role"] == "raw"]
-        if len(competing) < 2:
-            continue
-        readable = {id(item) for item in competing if kinds[id(item)] in {"vendor", "converted"}}
         vendor = {id(item) for item in competing if kinds[id(item)] == "vendor"}
-        preferred = vendor or readable
-        if not preferred or len(preferred) == len(competing):
-            # Either nothing MS-DIAL can read, or the duplicates are equally preferred and this
-            # rule has no opinion about which of them to open.
-            continue
-        for item in competing:
-            if id(item) not in preferred:
-                item["role"] = "raw_alternate"
-                item["demoted_because"] = (
-                    "a vendor raw container for the same sample is published alongside it"
-                    if vendor
-                    else "MS-DIAL cannot read this format and a readable container is published "
+        readable = {id(item) for item in competing if kinds[id(item)] in {"vendor", "converted"}}
+        convertible = {id(item) for item in competing if _is_convertible(_file_path(item))}
+        preferred = vendor or readable or convertible
+        # With nothing MS-DIAL can read or convert, or duplicates that are equally preferred, this
+        # rule has no opinion about which of them to open.
+        if preferred and len(preferred) < len(competing):
+            if vendor:
+                reason = "a vendor raw container for the same sample is published alongside it"
+            elif readable:
+                reason = (
+                    "MS-DIAL cannot read this format and a readable container is published "
                     "alongside it"
                 )
+            else:
+                reason = (
+                    "MS-DIAL cannot read this format and no conversion of it is planned, and an "
+                    "mzXML of the same sample, which is converted to mzML, is published alongside it"
+                )
+            for item in competing:
+                if id(item) not in preferred:
+                    item["role"] = "raw_alternate"
+                    item["demoted_because"] = reason
+        kept = [item for item in group if item["role"] == "raw"]
+        demoted = [_file_path(item) for item in group if item["role"] == "raw_alternate"]
+        if len(kept) == 1 and demoted:
+            twins[_slashes(_file_path(kept[0])).casefold()] = demoted
+    return twins
+
+
+def _is_convertible(path: str) -> bool:
+    """Whether a file, packed or not, is a format the campaign converts to mzML (an mzXML)."""
+    return _slashes(archived_container_of(path) or path).casefold().endswith(CONVERTIBLE_SUFFIXES)
 
 
 def normalize_analysis_unit(unit: dict[str, Any]) -> dict[str, Any]:

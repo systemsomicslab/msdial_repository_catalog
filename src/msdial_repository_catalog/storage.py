@@ -768,9 +768,10 @@ class Catalog:
         carries no URL. `bundle_bytes` and `urls` are what they always were. `objects` is
         download_objects for the same URLs, and the totals are computed from it, so the figure a person
         approves and the objects a store claims cannot disagree. `bundle_size_known` is false when any
-        object's size is not listed, a URL is not indexed at all, a file carries no URL, or there is no
+        object's size is not known, a URL is not indexed at all, a file carries no URL, or there is no
         URL: `bundle_bytes` then counts only what the listings state and is a lower bound, never the
-        size.
+        size. A file listed at 0 with the digest of empty content is a known 0 bytes, and
+        `empty_digest_object_count` counts the objects holding one.
         """
         listed = [str(value or "").strip() for value in urls]
         values = sorted({value for value in listed if value})
@@ -1177,8 +1178,9 @@ class Catalog:
 _ARCHIVE_ROLES = frozenset({"raw_archive", "shared_raw_archive"})
 _CHECKSUM_ALGORITHMS = {32: "md5", 40: "sha1", 64: "sha256"}
 # The digests of zero bytes. MetaboBank lists every Bruker .d marker (lock.file, SyncHelper, the .d
-# file itself) at size 0 with the empty MD5. That is evidence the file is empty, but not a listed
-# size, so such a path still counts as unknown and is reported apart (empty_digest_paths).
+# file itself) at size 0 with the empty MD5. A 0 that such a checksum vouches for is a known 0 bytes,
+# as the user decided on 2026-09-30, and is counted apart (empty_digest_paths); a 0 without one is
+# still no size.
 _EMPTY_DIGESTS = frozenset({
     hashlib.md5(b"").hexdigest(), hashlib.sha1(b"").hexdigest(), hashlib.sha256(b"").hexdigest(),
 })
@@ -1200,10 +1202,10 @@ def download_objects(connection: sqlite3.Connection, urls: list[str]) -> list[di
       row gives it (see ONE CONTRIBUTION PER DISTINCT FILE below). A path whose rows all say 0 has
       no listed size, and then `size_known` is false and `bytes` is None -- never 0 -- while
       `known_bytes` is the part the listings do state, a lower bound. `unknown_size_paths` counts
-      those paths and `empty_digest_paths` how many of them declare the checksum of zero bytes:
-      evidence that the file is empty, which a disk guard may accept by its own policy, but not a
-      size, and the Catalog does not report one. Sizes are the repository's own listing: Workbench
-      prints them rounded ("12.3 GB").
+      those paths. The exception is a 0 whose declared checksum is the digest of empty content
+      (MD5, SHA-1 or SHA-256), with no other checksum declared for the path: that path is a known
+      0 bytes, and `empty_digest_paths` counts such paths, which are not among the unknown. Sizes
+      are the repository's own listing: Workbench prints them rounded ("12.3 GB").
     - `checksum`, `checksum_algorithm`, `checksum_scope`: the declared checksum of the object's own
       bytes (scope object), none for a bundle whose checksums are its members' (scope members), or
       none when the rows disagree (scope conflicting, with `declared_checksums`).
@@ -1264,16 +1266,18 @@ def _download_object(url: str, entry: dict[str, Any]) -> dict[str, Any]:
     # A SIZE OF 0 IS NOT A SIZE. In the declared pool 17,082 MetaboLights objects are listed at 0
     # bytes -- per-sample container zips, mzML, Waters members -- because the public index gave none.
     # Summed as 0 they made a unit look free, and a disk guard would admit it on that figure.
-    # MetaboBank lists 1,421 more at 0, Bruker .d markers each carrying the MD5 of zero bytes. They are
-    # very likely empty files, but reading the checksum as a size is an inference, and whether a disk
-    # guard accepts it is a decision for its policy on unknown sizes: they count as unknown here, like
-    # every other 0, and empty_digest_paths reports them apart so that the policy can.
+    #
+    # UNLESS THE CHECKSUM SAYS IT IS EMPTY. MetaboBank lists 1,421 declared-pool files at 0 too,
+    # Bruker .d markers (lock.file, SyncHelper, the .d file) each carrying the MD5 of zero bytes, and
+    # they held four MTBKS219/220 units at unknown size although nothing else in them was. The listed
+    # 0 and a declared digest of empty content agree, and the digest is what the download is verified
+    # against: a file of any other length fails it. On 2026-09-30 the user decided that such a path is
+    # a known 0 bytes. Only that: a 0 with no checksum, or with any checksum besides an empty digest,
+    # is still no size, and empty_digest_paths keeps the paths known empty by digest in view.
     paths = entry["paths"]
-    unlisted = [item for item in paths.values() if item["size"] <= 0]
-    unknown_paths = len(unlisted)
-    empty_digest_paths = sum(
-        1 for item in unlisted if item["checksums"] and item["checksums"] <= _EMPTY_DIGESTS
-    )
+    empty = [item for item in paths.values() if item["size"] <= 0 and _empty_by_digest(item)]
+    unknown_paths = sum(1 for item in paths.values() if item["size"] <= 0) - len(empty)
+    empty_digest_paths = len(empty)
     known_bytes = sum(item["size"] for item in paths.values() if item["size"] > 0)
     repositories = sorted(entry["repositories"])
     accessions = sorted(entry["accessions"])
@@ -1330,6 +1334,11 @@ def _download_object(url: str, entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _empty_by_digest(listed: dict[str, Any]) -> bool:
+    """Whether a listed path's declared checksums are all, and at least one, a digest of zero bytes."""
+    return bool(listed["checksums"]) and listed["checksums"] <= _EMPTY_DIGESTS
+
+
 def download_plan(connection: sqlite3.Connection, unit_ids: list[str]) -> dict[str, Any]:
     """What fetching a list of units amounts to when each object is fetched once.
 
@@ -1337,8 +1346,10 @@ def download_plan(connection: sqlite3.Connection, unit_ids: list[str]) -> dict[s
     objects have no listed size; the distinct totals; and the sharing groups -- units joined, directly
     or through other selected units, by an object more than one of them needs, which is the scope of
     one store claim set and the order a runner keeps together. Bytes follow download_objects: `bytes`
-    and `distinct_bytes` count only objects whose size is listed, the `_lower_bound` figures add the
-    stated part of the others, and an object of unknown size is counted, never priced at 0.
+    and `distinct_bytes` count only objects whose size is known, the `_lower_bound` figures add the
+    stated part of the others, and an object of unknown size is counted, never priced at 0. A file
+    listed at 0 with the digest of empty content is a known 0 bytes, and `empty_digest_objects`
+    counts the objects holding one.
 
     A unit's `size_known` is false, and its `bytes` None, when one of its objects has no listed size,
     when one of its files carries no URL (`files_without_url`), or when it lists no file at all:
@@ -1464,10 +1475,9 @@ def _byte_totals(objects: list[dict[str, Any]]) -> dict[str, int]:
         "distinct_bytes": sum(item["known_bytes"] for item in objects if item["size_known"]),
         "distinct_bytes_lower_bound": sum(item["known_bytes"] for item in objects),
         "unknown_size_objects": len(unknown),
-        # Of those, the objects whose every unlisted path declares the checksum of zero bytes.
-        "empty_digest_objects": sum(
-            1 for item in unknown if item["empty_digest_paths"] == item["unknown_size_paths"]
-        ),
+        # The objects holding a path listed at 0 whose checksum is the digest of zero bytes, a known
+        # 0 since 2026-09-30. Such an object is of unknown size only if another of its paths is.
+        "empty_digest_objects": sum(1 for item in objects if item["empty_digest_paths"]),
     }
 
 
