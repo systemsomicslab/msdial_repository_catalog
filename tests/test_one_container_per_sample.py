@@ -18,8 +18,10 @@ from pathlib import Path
 
 from msdial_repository_catalog.class_proposal import (
     CONVERTED_SUFFIXES,
+    CONVERTIBLE_SUFFIXES,
     UNREADABLE_SUFFIXES,
     VENDOR_RAW_SUFFIXES,
+    normalize_analysis_unit,
     normalize_file_roles,
 )
 
@@ -176,6 +178,114 @@ class NoMzxmlReaderTests(unittest.TestCase):
         self.assertEqual("raw_alternate", roles["raw/s.mzXML"])
         demoted = next(f for f in result if f["role"] == "raw_alternate")
         self.assertIn("cannot read this format", demoted["demoted_because"])
+
+
+class MzxmlOutranksAFormatWithNoRouteTests(unittest.TestCase):
+    """Decided by the user on 2026-09-30: a convertible mzXML outranks an unreadable twin.
+
+    MetaboLights MTBLS688 lists most of its samples twice, as x.mzXML.lzma under DERIVED_FILES and
+    as x.dat under RAW_FILES, and both were inputs: 4,526 for the 2,263 samples of its negative
+    unit. The mzXML is converted to mzML and analysed; the .dat, which MS-DIAL cannot read and
+    nothing converts, is kept for provenance as the alternate.
+    """
+
+    NEG = "FILES/DERIVED_FILES/NEG1"
+    RAW = "FILES/RAW_FILES/NEG1"
+
+    def test_the_mtbls688_shape(self) -> None:
+        result = {item["path"]: item for item in _files(f"{self.NEG}/s_Seg1Ev2.mzXML.lzma", f"{self.RAW}/s_Seg1Ev2.dat")}
+        packed, dat = result[f"{self.NEG}/s_Seg1Ev2.mzXML.lzma"], result[f"{self.RAW}/s_Seg1Ev2.dat"]
+
+        self.assertEqual(("raw", "raw_alternate"), (packed["role"], dat["role"]))
+        self.assertEqual("mzML", packed["conversion_target"])
+        self.assertIn("no conversion of it is planned", dat["demoted_because"])
+        self.assertNotIn("conversion_target", dat, "still marked, but with nowhere to convert to")
+        self.assertTrue(dat["requires_conversion"])
+
+    def test_every_format_nothing_converts_loses_to_an_mzxml(self) -> None:
+        for suffix in sorted(set(UNREADABLE_SUFFIXES) - set(CONVERTIBLE_SUFFIXES)):
+            with self.subTest(suffix):
+                roles = _roles("raw/s.mzXML", f"raw/s{suffix}")
+                self.assertEqual({"raw/s.mzXML": "raw", f"raw/s{suffix}": "raw_alternate"}, roles)
+
+    def test_it_never_demotes_a_container_msdial_reads(self) -> None:
+        """Only where no vendor or converted container competes; they still win over both."""
+        for suffix in VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES:
+            with self.subTest(suffix):
+                roles = _roles(f"raw/s{suffix}", "raw/s.mzXML.lzma", "raw/s.dat")
+                self.assertEqual("raw", roles[f"raw/s{suffix}"])
+                self.assertEqual("raw_alternate", roles["raw/s.mzXML.lzma"])
+                self.assertEqual("raw_alternate", roles["raw/s.dat"])
+
+    def test_two_formats_nothing_converts_are_left_alone(self) -> None:
+        self.assertEqual({"raw"}, set(_roles("raw/s.dat", "raw/s.mzData").values()))
+
+    def test_the_row_naming_the_dat_names_the_mzxml_sample(self) -> None:
+        """MTBLS688's rows name the .dat. Its sample, and its Factor Values, go to the mzXML."""
+        unit = {
+            "samples": [{"sample_id": "1-1_1", "raw_file": f"{self.RAW}/1-1_1_Seg1Ev2.dat",
+                         "attributes": {"Factor Value[dose]": "1k5"}}],
+            "files": [
+                {"path": f"{self.NEG}/1-1_1_Seg1Ev2.mzXML.lzma", "role": "raw", "sample_id": ""},
+                {"path": f"{self.RAW}/1-1_1_Seg1Ev2.dat", "role": "raw", "sample_id": ""},
+            ],
+        }
+
+        view = normalize_analysis_unit(unit)
+        (entry,) = view["analysis_inputs"]
+        (sample,) = view["samples"]
+
+        self.assertEqual((f"{self.NEG}/1-1_1_Seg1Ev2.mzXML", "1-1_1"), (entry["path"], entry["sample_id"]))
+        self.assertEqual({"Factor Value[dose]": "1k5"}, sample["attributes"])
+        self.assertEqual(f"{self.NEG}/1-1_1_Seg1Ev2.mzXML.lzma", sample["raw_file"], "named for what is analysed")
+        again = normalize_analysis_unit(view)
+        self.assertEqual(view["analysis_inputs"], again["analysis_inputs"], "the projection of a projection")
+        self.assertEqual(view["samples"], again["samples"])
+
+    def test_a_row_naming_the_input_itself_comes_first(self) -> None:
+        unit = {
+            "samples": [
+                {"sample_id": "dat_row", "raw_file": "raw/s.dat"},
+                {"sample_id": "mzxml_row", "raw_file": "raw/s.mzXML"},
+            ],
+            "files": [{"path": "raw/s.dat", "role": "raw"}, {"path": "raw/s.mzXML", "role": "raw"}],
+        }
+
+        (entry,) = normalize_analysis_unit(unit)["analysis_inputs"]
+
+        self.assertEqual("mzxml_row", entry["sample_id"])
+
+    def test_two_encodings_left_take_no_row_by_their_twin(self) -> None:
+        """Which of two mzXML the .dat row meant is not stated, so neither is given it."""
+        unit = {
+            "samples": [{"sample_id": "s_row", "raw_file": "raw/s.dat"}],
+            "files": [
+                {"path": "raw/s.mzXML.gz", "role": "raw"},
+                {"path": "raw/s.mzXML.lzma", "role": "raw"},
+                {"path": "raw/s.dat", "role": "raw"},
+            ],
+        }
+
+        view = normalize_analysis_unit(unit)
+
+        self.assertEqual(2, view["analysis_file_count"])
+        self.assertNotIn("s_row", [entry["sample_id"] for entry in view["analysis_inputs"]])
+
+    def test_names_that_differ_are_not_paired(self) -> None:
+        """MTBLS688 spells 105 samples of each unit two ways, 10plus_ and 10_plus__: not one stem."""
+        unit = {
+            "samples": [{"sample_id": "10+_1k5_10ul_1", "raw_file": f"{self.RAW}/10_plus__1k5_10ul_1_Seg1Ev2.dat"}],
+            "files": [
+                {"path": f"{self.NEG}/10plus_1k5_10ul_1_Seg1Ev2.mzXML.lzma", "role": "raw"},
+                {"path": f"{self.RAW}/10_plus__1k5_10ul_1_Seg1Ev2.dat", "role": "raw"},
+            ],
+        }
+
+        view = normalize_analysis_unit(unit)
+        by_path = {entry["path"]: entry["sample_id"] for entry in view["analysis_inputs"]}
+
+        self.assertEqual(2, len(by_path), "both stay inputs; pairing them would be an inference")
+        self.assertEqual("10+_1k5_10ul_1", by_path[f"{self.RAW}/10_plus__1k5_10ul_1_Seg1Ev2.dat"])
 
 
 class SharedVectorTests(unittest.TestCase):

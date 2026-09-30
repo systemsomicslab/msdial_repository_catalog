@@ -103,7 +103,16 @@ archive such as `x.d.zip` is one input whose `path` is the container it unpacks
 to, and a packed file is read as the file it unpacks to (`unpacks_to`), so
 `x.wiff.scan.zip` is a sidecar and `x.mzXML.lzma` an mzXML to convert. A
 container listed both unpacked and as its own archive is analysed unpacked, and
-the archive becomes `raw_alternate`. `analytical_sample_count` and
+the archive becomes `raw_alternate`. Of several encodings of one sample, whose
+basenames match with the container suffix removed, one is analysed and the
+rest become `raw_alternate`: a vendor container or folder first, then an mzML
+or imzML, then an mzXML, which is converted to mzML. A format MS-DIAL cannot
+read and nothing converts (`.dat`, `.mzData`, `.mgf`) therefore loses to an
+mzXML of the same sample (decided 2026-09-30; MTBLS688 lists `x.mzXML.lzma`
+beside `x.dat`), and two encodings of equal rank are both left. A sample row
+that names a demoted encoding names the sample of the one analysed, when that
+one is the only encoding left and no row names it. The full rule and its cases
+are `tests/vectors/encoding_preference.v1.json`. `analytical_sample_count` and
 `download_scope.analysis_file_count` count the `analysis_inputs`;
 `sample_count` counts the sample rows, and equals that count when
 `analysis_inputs_declared` is true and no `analysis_input` issue blocks. A
