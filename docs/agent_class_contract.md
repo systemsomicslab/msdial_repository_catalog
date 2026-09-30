@@ -50,6 +50,24 @@ workflow applies its own confirmation and bundle-aware size limits. The MCP
 response is a compact summary. Pass its `handoff_path` to Interactive rather
 than relaying or truncating the full file and sample manifests through a model.
 
+`download_scope.objects` in the handoff file lists one object per download URL,
+as a download store holds it: its `name` (`<accession>.tar` for MB-POST, the
+URL's last path segment otherwise), `kind`, `bytes`, `size_known`, declared
+`checksum` and `checksum_algorithm`, and `consumer_unit_ids`, every unit that
+lists the URL across polarities and units of the accession. A size the listings
+do not state, which includes every size listed as 0, is `bytes: null`, never 0.
+`bundle_size_known` is false when any object's size is not stated, a URL is
+not indexed, a file carries no URL (`files_without_url`), or the unit lists no
+file at all; `bundle_bytes` then counts only stated sizes and is a lower bound.
+MetaboBank lists Bruker `.d` marker files at 0 with the MD5 of zero bytes: they
+are still of unknown size, and `empty_digest_paths` per object (and
+`empty_digest_object_count`) reports them apart, for a disk guard whose policy
+on unknown sizes accepts that checksum. The objects are omitted from the MCP
+response. A campaign planner reads the same objects for many units through
+`Catalog.download_plan`, or `storage.download_plan` on a read-only connection;
+there a unit's `size_known` follows the same rule, and `units_of_unknown_size`
+counts the units it is false for.
+
 The handoff counts analysis inputs, not files (`analysis_input_model`
 `one-input-per-sample.v1`). A Waters `.raw` or an Agilent or Bruker `.d`
 folder is one input, one sample row and one Class assignment; the files

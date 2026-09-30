@@ -532,8 +532,18 @@ def msdial_catalog_reanalysis_handoff(
             "analysis_file_count": len(inputs),
             "total_file_bytes": sum(int(item.get("size_bytes") or 0) for item in files),
             "bundle_bytes": scope["bundle_bytes"],
+            "bundle_size_known": scope["bundle_size_known"],
             "bundle_shared_unit_count": scope["bundle_shared_unit_count"],
             "bundle_urls": scope["urls"],
+            # Additive on v1: one object per URL, as a download store holds it, with every unit that
+            # claims it (Catalog.download_objects), so Interactive can pre-claim shared objects
+            # without querying the Catalog. An object whose size no listing states has bytes null,
+            # and bundle_size_known is false then, and for a unit with no file or a file with no URL.
+            "object_count": scope["object_count"],
+            "unknown_size_object_count": scope["unknown_size_object_count"],
+            "empty_digest_object_count": scope["empty_digest_object_count"],
+            "files_without_url": scope["files_without_url"],
+            "objects": scope["objects"],
             "note": (
                 "Download URLs may resolve to an accession bundle. Retain only paths listed "
                 "in files and verify checksums when supplied."
@@ -588,6 +598,9 @@ def msdial_catalog_reanalysis_handoff(
     response["files_omitted"] = True
     response["analysis_inputs"] = []
     response["analysis_inputs_omitted"] = True
+    # One object per URL is one per file for a per-file unit, thousands of them: they are in the
+    # handoff file, which is what Interactive reads.
+    response["download_scope"] = {**payload["download_scope"], "objects": [], "objects_omitted": True}
     return response
 
 

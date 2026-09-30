@@ -4,11 +4,13 @@ import copy
 import gzip
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import tempfile
+import urllib.parse
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .context import context_values, normalize_field_name, normalize_value
@@ -708,59 +710,53 @@ class Catalog:
         return normalize_analysis_unit(result)
 
     def download_scope(self, urls: list[str]) -> dict[str, Any]:
-        values = sorted({str(value).strip() for value in urls if str(value).strip()})
-        if not values:
-            return {"bundle_bytes": 0, "bundle_shared_unit_count": 0, "urls": []}
-        placeholders = ",".join("?" for _ in values)
-        # ONE CONTRIBUTION PER DISTINCT FILE, NOT PER ROW.
-        #
-        # raw_file holds one row per (unit, file), so a download_url that several analysis units
-        # share produced one row per unit and SUM(size_bytes) multiplied the archive by the number
-        # of units. Measured against the index: ST004151_Rawfiles.zip is 38.0 GB and was reported as
-        # 380.1 GB across its ten units; ST002965_Rawdata.zip is 54.0 GB and was reported as
-        # 216.0 GB across four. 5,355 download URLs are shared by more than one unit.
-        #
-        # The project contract names this figure "the download approval and safety-limit quantity",
-        # so the number a person is asked to approve was an order of magnitude too large for the
-        # majority of candidates -- which rejects units that would have fitted, and teaches whoever
-        # reads it that the figure cannot be trusted.
-        #
-        # SUM is right for one shape and wrong for the other, and `path` is what tells them apart.
-        # A MetaboBank download_url is a per-file endpoint: MPST000003.0 carries 120 rows with 120
-        # distinct paths and 120 different sizes, all genuinely downloaded. A Metabolomics Workbench
-        # download_url is one archive: ST004151_Rawfiles.zip carries 10 rows with ONE distinct path
-        # and one repeated size, downloaded once. Grouping by path first counts each file once in
-        # both shapes; MAX would have been correct for the archive and would have reported one file
-        # of a hundred and twenty for the endpoint.
-        rows = self.connection.execute(
-            f"""
-            SELECT r.download_url,
-                   (SELECT COALESCE(SUM(f.file_bytes), 0)
-                      FROM (SELECT path, MAX(size_bytes) AS file_bytes
-                              FROM raw_file
-                             WHERE download_url = r.download_url
-                             GROUP BY path) f) AS bundle_bytes,
-                   COUNT(DISTINCT r.unit_id) AS unit_count
-              FROM raw_file r
-             WHERE r.download_url IN ({placeholders})
-             GROUP BY r.download_url
-            """,
-            values,
-        ).fetchall()
+        """The download a unit's URLs amount to: per-URL objects, and the totals a person approves.
+
+        `urls` holds one entry per file, as the handoff passes it, so a blank entry is a file that
+        carries no URL. `bundle_bytes` and `urls` are what they always were. `objects` is
+        download_objects for the same URLs, and the totals are computed from it, so the figure a person
+        approves and the objects a store claims cannot disagree. `bundle_size_known` is false when any
+        object's size is not listed, a URL is not indexed at all, a file carries no URL, or there is no
+        URL: `bundle_bytes` then counts only what the listings state and is a lower bound, never the
+        size.
+        """
+        listed = [str(value or "").strip() for value in urls]
+        values = sorted({value for value in listed if value})
+        objects = download_objects(self.connection, values)
+        found = {item["url"] for item in objects}
+        unindexed = [value for value in values if value not in found]
+        without_url = sum(1 for value in listed if not value)
+        totals = _byte_totals(objects)
+        unknown = totals["unknown_size_objects"]
         return {
-            "bundle_bytes": sum(int(row["bundle_bytes"] or 0) for row in rows),
+            "bundle_bytes": totals["distinct_bytes_lower_bound"],
+            "bundle_size_known": bool(values) and not unknown and not unindexed and not without_url,
             "bundle_shared_unit_count": max(
-                (int(row["unit_count"] or 0) for row in rows), default=0
+                (item["shared_unit_count"] for item in objects), default=0
             ),
             "urls": [
                 {
-                    "url": str(row["download_url"]),
-                    "bytes": int(row["bundle_bytes"] or 0),
-                    "shared_unit_count": int(row["unit_count"] or 0),
+                    "url": item["url"],
+                    "bytes": item["known_bytes"],
+                    "shared_unit_count": item["shared_unit_count"],
                 }
-                for row in rows
+                for item in objects
             ],
+            "object_count": len(objects),
+            "unknown_size_object_count": unknown,
+            "empty_digest_object_count": totals["empty_digest_objects"],
+            "unindexed_urls": unindexed,
+            "files_without_url": without_url,
+            "objects": objects,
         }
+
+    def download_objects(self, urls: list[str]) -> list[dict[str, Any]]:
+        """One object per indexed URL; see the module-level download_objects."""
+        return download_objects(self.connection, urls)
+
+    def download_plan(self, unit_ids: list[str]) -> dict[str, Any]:
+        """Distinct objects and sharing groups for a list of units; see the module-level download_plan."""
+        return download_plan(self.connection, unit_ids)
 
     def save_class_proposal(self, proposal: ClassProposal) -> None:
         from .class_proposal import validate_class_proposal
@@ -930,6 +926,315 @@ class Catalog:
         manifest_path = output / "catalog-release-manifest.json"
         manifest_path.write_text(_json(manifest, indent=2), encoding="utf-8")
         return {**manifest, "manifest_path": str(manifest_path)}
+
+
+# DOWNLOAD OBJECTS: WHAT IS FETCHED, ONCE, AND WHO NEEDS IT.
+#
+# A campaign fetches each repository object once and links it into every unit that needs it
+# (Interactive's download_store.py). That needs, per URL, what the store will hold and which units
+# claim it, and the figure a person approves has to be the same objects counted once. These two
+# functions are that one computation: the reanalysis handoff (download_scope.objects) and a campaign
+# planner both call them. They take a plain sqlite3 connection and only read, so a planner can run
+# them on a read-only connection (mode=ro) without opening a Catalog, which would migrate the schema.
+_ARCHIVE_ROLES = frozenset({"raw_archive", "shared_raw_archive"})
+_CHECKSUM_ALGORITHMS = {32: "md5", 40: "sha1", 64: "sha256"}
+# The digests of zero bytes. MetaboBank lists every Bruker .d marker (lock.file, SyncHelper, the .d
+# file itself) at size 0 with the empty MD5. That is evidence the file is empty, but not a listed
+# size, so such a path still counts as unknown and is reported apart (empty_digest_paths).
+_EMPTY_DIGESTS = frozenset({
+    hashlib.md5(b"").hexdigest(), hashlib.sha1(b"").hexdigest(), hashlib.sha256(b"").hexdigest(),
+})
+_HEX = re.compile(r"[0-9a-f]+")
+_QUERY_CHUNK = 500
+
+
+def download_objects(connection: sqlite3.Connection, urls: list[str]) -> list[dict[str, Any]]:
+    """One object per indexed URL, in URL order. A URL no raw_file row names yields nothing.
+
+    Each object says:
+    - `name`: the file name the object is stored under. MB-POST serves a whole project as one tar
+      and Interactive names it <accession>.tar; everything else keeps the last segment of its URL
+      path, unquoted: a Workbench study archive, a MetaboLights per-file object or per-sample
+      container zip, a MetaboBank file.
+    - `kind`: bundle (one transfer carrying several listed paths: MB-POST), archive (a study
+      archive Workbench lists as raw_archive or shared_raw_archive), or file.
+    - `bytes`, `known_bytes`, `size_known`: each listed path counts once, at the largest size any
+      row gives it (see ONE CONTRIBUTION PER DISTINCT FILE below). A path whose rows all say 0 has
+      no listed size, and then `size_known` is false and `bytes` is None -- never 0 -- while
+      `known_bytes` is the part the listings do state, a lower bound. `unknown_size_paths` counts
+      those paths and `empty_digest_paths` how many of them declare the checksum of zero bytes:
+      evidence that the file is empty, which a disk guard may accept by its own policy, but not a
+      size, and the Catalog does not report one. Sizes are the repository's own listing: Workbench
+      prints them rounded ("12.3 GB").
+    - `checksum`, `checksum_algorithm`, `checksum_scope`: the declared checksum of the object's own
+      bytes (scope object), none for a bundle whose checksums are its members' (scope members), or
+      none when the rows disagree (scope conflicting, with `declared_checksums`).
+    - `consumer_unit_ids`: every analysis unit whose files list the URL, across polarities and units
+      of the same accession -- the claims a store must hold before it may release the object.
+    """
+    values = sorted({str(value).strip() for value in urls if str(value).strip()})
+    found: dict[str, dict[str, Any]] = {}
+    for chunk in _chunks(values):
+        placeholders = ",".join("?" for _ in chunk)
+        for url, path, size, checksum, role, unit_id, repository, accession in connection.execute(
+            f"""
+            SELECT r.download_url, r.path, r.size_bytes, r.checksum, r.role, r.unit_id,
+                   s.repository, s.accession
+              FROM raw_file r
+              JOIN analysis_unit u ON u.unit_id = r.unit_id
+              JOIN study s ON s.study_id = u.study_id
+             WHERE r.download_url IN ({placeholders})
+            """,
+            chunk,
+        ):
+            entry = found.setdefault(
+                str(url), {"paths": {}, "units": set(), "repositories": set(), "accessions": set()}
+            )
+            listed = entry["paths"].setdefault(str(path), {"size": 0, "checksums": set(), "roles": set()})
+            listed["size"] = max(listed["size"], int(size or 0))
+            if str(checksum or "").strip():
+                listed["checksums"].add(str(checksum).strip().casefold())
+            listed["roles"].add(str(role or "raw"))
+            entry["units"].add(str(unit_id))
+            entry["repositories"].add(str(repository))
+            entry["accessions"].add(str(accession))
+    return [_download_object(url, found[url]) for url in values if url in found]
+
+
+def _download_object(url: str, entry: dict[str, Any]) -> dict[str, Any]:
+    # ONE CONTRIBUTION PER DISTINCT FILE, NOT PER ROW.
+    #
+    # raw_file holds one row per (unit, file), so a download_url that several analysis units
+    # share produced one row per unit and SUM(size_bytes) multiplied the archive by the number
+    # of units. Measured against the index: ST004151_Rawfiles.zip is 38.0 GB and was reported as
+    # 380.1 GB across its ten units; ST002965_Rawdata.zip is 54.0 GB and was reported as
+    # 216.0 GB across four. 5,355 download URLs are shared by more than one unit.
+    #
+    # The project contract names this figure "the download approval and safety-limit quantity",
+    # so the number a person is asked to approve was an order of magnitude too large for the
+    # majority of candidates -- which rejects units that would have fitted, and teaches whoever
+    # reads it that the figure cannot be trusted.
+    #
+    # SUM is right for one shape and wrong for the other, and `path` is what tells them apart.
+    # An MB-POST download_url serves a whole project in one transfer: MPST000003.0 carries 120 rows
+    # with 120 distinct paths and 120 different sizes, all genuinely downloaded. A Metabolomics
+    # Workbench download_url is one archive: ST004151_Rawfiles.zip carries 10 rows with ONE distinct
+    # path and one repeated size, downloaded once. Grouping by path first counts each file once in
+    # both shapes; MAX would have been correct for the archive and would have reported one file of a
+    # hundred and twenty for the endpoint.
+    #
+    # A SIZE OF 0 IS NOT A SIZE. In the declared pool 17,082 MetaboLights objects are listed at 0
+    # bytes -- per-sample container zips, mzML, Waters members -- because the public index gave none.
+    # Summed as 0 they made a unit look free, and a disk guard would admit it on that figure.
+    # MetaboBank lists 1,421 more at 0, Bruker .d markers each carrying the MD5 of zero bytes. They are
+    # very likely empty files, but reading the checksum as a size is an inference, and whether a disk
+    # guard accepts it is a decision for its policy on unknown sizes: they count as unknown here, like
+    # every other 0, and empty_digest_paths reports them apart so that the policy can.
+    paths = entry["paths"]
+    unlisted = [item for item in paths.values() if item["size"] <= 0]
+    unknown_paths = len(unlisted)
+    empty_digest_paths = sum(
+        1 for item in unlisted if item["checksums"] and item["checksums"] <= _EMPTY_DIGESTS
+    )
+    known_bytes = sum(item["size"] for item in paths.values() if item["size"] > 0)
+    repositories = sorted(entry["repositories"])
+    accessions = sorted(entry["accessions"])
+    repository = repositories[0] if len(repositories) == 1 else ""
+    accession = accessions[0] if len(accessions) == 1 else ""
+    roles = sorted({role for item in paths.values() for role in item["roles"]})
+    single = next(iter(paths)) if len(paths) == 1 else ""
+    if repository == "mb_post" or len(paths) > 1:
+        kind = "bundle"
+    elif _ARCHIVE_ROLES & set(roles):
+        kind = "archive"
+    else:
+        kind = "file"
+    # Not a fragment: Workbench lists ST001957_Method#1_HILIC_Pos_Raw.7z with the '#' unencoded.
+    name = PurePosixPath(urllib.parse.unquote(urllib.parse.urlsplit(url, allow_fragments=False).path)).name
+    if repository == "mb_post" and accession:
+        name = f"{accession}.tar"  # Interactive's name for the project tar (repository_reanalysis.py).
+    elif not name and single:
+        name = PurePosixPath(single.replace("\\", "/")).name
+    declared = sorted({value for item in paths.values() for value in item["checksums"]})
+    checksum, algorithm, scope = "", "", "none"
+    if kind == "bundle":
+        scope = "members" if declared else "none"
+    elif len(declared) == 1:
+        checksum, scope = declared[0], "object"
+        algorithm = _CHECKSUM_ALGORITHMS.get(len(checksum), "") if _HEX.fullmatch(checksum) else ""
+        algorithm = algorithm or "unknown"
+    elif declared:
+        scope = "conflicting"
+    result: dict[str, Any] = {
+        "url": url,
+        "name": name,
+        "kind": kind,
+        "repository": repository,
+        "accession": accession,
+        "path": single,
+        "path_count": len(paths),
+        "roles": roles,
+        "bytes": known_bytes if not unknown_paths else None,
+        "known_bytes": known_bytes,
+        "size_known": not unknown_paths,
+        "unknown_size_paths": unknown_paths,
+        "empty_digest_paths": empty_digest_paths,
+        "checksum": checksum,
+        "checksum_algorithm": algorithm,
+        "checksum_scope": scope,
+        "consumer_unit_ids": sorted(entry["units"]),
+        "shared_unit_count": len(entry["units"]),
+    }
+    if scope == "conflicting":
+        result["declared_checksums"] = declared
+    if not accession:
+        result["accessions"] = accessions
+    return result
+
+
+def download_plan(connection: sqlite3.Connection, unit_ids: list[str]) -> dict[str, Any]:
+    """What fetching a list of units amounts to when each object is fetched once.
+
+    Returns the distinct objects the units need; per unit, its objects, its bytes and how many of its
+    objects have no listed size; the distinct totals; and the sharing groups -- units joined, directly
+    or through other selected units, by an object more than one of them needs, which is the scope of
+    one store claim set and the order a runner keeps together. Bytes follow download_objects: `bytes`
+    and `distinct_bytes` count only objects whose size is listed, the `_lower_bound` figures add the
+    stated part of the others, and an object of unknown size is counted, never priced at 0.
+
+    A unit's `size_known` is false, and its `bytes` None, when one of its objects has no listed size,
+    when one of its files carries no URL (`files_without_url`), or when it lists no file at all:
+    nothing then says what it needs, and that is not 0 bytes. `units_of_unknown_size` counts them.
+    Units that list no file, and ids the catalog does not know, are reported rather than dropped.
+    """
+    requested = list(dict.fromkeys(str(value).strip() for value in unit_ids if str(value).strip()))
+    identity: dict[str, tuple[str, str]] = {}
+    unit_urls: dict[str, set[str]] = {}
+    without_url: dict[str, int] = {}
+    for chunk in _chunks(requested):
+        placeholders = ",".join("?" for _ in chunk)
+        for unit_id, repository, accession in connection.execute(
+            "SELECT u.unit_id, s.repository, s.accession FROM analysis_unit u "
+            f"JOIN study s ON s.study_id = u.study_id WHERE u.unit_id IN ({placeholders})",
+            chunk,
+        ):
+            identity[str(unit_id)] = (str(repository), str(accession))
+            unit_urls.setdefault(str(unit_id), set())
+        for unit_id, url in connection.execute(
+            f"SELECT unit_id, download_url FROM raw_file WHERE unit_id IN ({placeholders})", chunk
+        ):
+            value = str(url or "").strip()
+            if value:
+                unit_urls[str(unit_id)].add(value)
+            else:
+                without_url[str(unit_id)] = without_url.get(str(unit_id), 0) + 1
+    objects = download_objects(connection, sorted(set().union(*unit_urls.values())))
+    by_url = {item["url"]: item for item in objects}
+    for item in objects:
+        item["selected_consumer_unit_ids"] = [
+            unit for unit in item["consumer_unit_ids"] if unit in unit_urls
+        ]
+
+    # Sharing groups: connected components of the selected units, joined by the objects they share.
+    parent = {unit: unit for unit, urls in unit_urls.items() if urls}
+
+    def root(unit: str) -> str:
+        while parent[unit] != unit:
+            parent[unit] = parent[parent[unit]]
+            unit = parent[unit]
+        return unit
+
+    for item in objects:
+        consumers = item["selected_consumer_unit_ids"]
+        for other in consumers[1:]:
+            left, right = root(consumers[0]), root(other)
+            if left != right:
+                parent[max(left, right)] = min(left, right)
+    members: dict[str, list[str]] = {}
+    for unit in sorted(parent):
+        members.setdefault(root(unit), []).append(unit)
+    group_of: dict[str, str] = {}
+    groups = []
+    for units in members.values():
+        group_id = stable_id("download-group", *units)
+        urls = sorted(set().union(*(unit_urls[unit] for unit in units)))
+        groups.append(
+            {
+                "group_id": group_id,
+                "unit_ids": units,
+                "unit_count": len(units),
+                "repositories": sorted({identity[unit][0] for unit in units}),
+                "accessions": sorted({identity[unit][1] for unit in units}),
+                "object_count": len(urls),
+                "shared_object_count": sum(
+                    1 for url in urls if len(by_url[url]["selected_consumer_unit_ids"]) > 1
+                ),
+                **_byte_totals([by_url[url] for url in urls]),
+                "per_unit_known_bytes": sum(
+                    by_url[url]["known_bytes"] for unit in units for url in unit_urls[unit]
+                ),
+                "files_without_url": sum(without_url.get(unit, 0) for unit in units),
+            }
+        )
+        group_of.update((unit, group_id) for unit in units)
+    groups.sort(key=lambda item: (-item["unit_count"], -item["distinct_bytes_lower_bound"], item["group_id"]))
+
+    units = []
+    for unit in requested:
+        if unit not in identity:
+            continue
+        needed = [by_url[url] for url in sorted(unit_urls[unit])]
+        totals = _byte_totals(needed)
+        size_known = bool(needed) and not without_url.get(unit) and not totals["unknown_size_objects"]
+        units.append(
+            {
+                "unit_id": unit,
+                "repository": identity[unit][0],
+                "accession": identity[unit][1],
+                "object_count": len(needed),
+                "bytes": totals["distinct_bytes"] if size_known else None,
+                "known_bytes": totals["distinct_bytes_lower_bound"],
+                "size_known": size_known,
+                "unknown_size_objects": totals["unknown_size_objects"],
+                "empty_digest_objects": totals["empty_digest_objects"],
+                "shared_object_count": sum(
+                    1 for item in needed if len(item["selected_consumer_unit_ids"]) > 1
+                ),
+                "files_without_url": without_url.get(unit, 0),
+                "group_id": group_of.get(unit, ""),
+            }
+        )
+    return {
+        "unit_count": len(requested),
+        "unknown_unit_ids": [unit for unit in requested if unit not in identity],
+        "units_without_objects": [unit["unit_id"] for unit in units if not unit["object_count"]],
+        "units_of_unknown_size": sum(1 for unit in units if not unit["size_known"]),
+        "distinct_objects": len(objects),
+        **_byte_totals(objects),
+        "per_unit_known_bytes": sum(unit["known_bytes"] for unit in units),
+        "shared_objects": sum(1 for item in objects if len(item["selected_consumer_unit_ids"]) > 1),
+        "group_count": len(groups),
+        "groups": groups,
+        "units": units,
+        "objects": objects,
+    }
+
+
+def _byte_totals(objects: list[dict[str, Any]]) -> dict[str, int]:
+    unknown = [item for item in objects if not item["size_known"]]
+    return {
+        "distinct_bytes": sum(item["known_bytes"] for item in objects if item["size_known"]),
+        "distinct_bytes_lower_bound": sum(item["known_bytes"] for item in objects),
+        "unknown_size_objects": len(unknown),
+        # Of those, the objects whose every unlisted path declares the checksum of zero bytes.
+        "empty_digest_objects": sum(
+            1 for item in unknown if item["empty_digest_paths"] == item["unknown_size_paths"]
+        ),
+    }
+
+
+def _chunks(values: list[str]) -> list[list[str]]:
+    return [values[index:index + _QUERY_CHUNK] for index in range(0, len(values), _QUERY_CHUNK)]
 
 
 def _json(value: Any, indent: int | None = None) -> str:
