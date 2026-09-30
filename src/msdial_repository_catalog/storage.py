@@ -15,6 +15,7 @@ from typing import Any
 
 from .context import context_values, normalize_field_name, normalize_value
 from .models import ClassProposal, StudyRecord, stable_id
+from .ratification import ACCEPTED_STATUS, ratification_record
 from .schema import BASE_SCHEMA, FTS_SCHEMA, SCHEMA_VERSION
 
 
@@ -80,18 +81,34 @@ class Catalog:
             self.fts_enabled = False
 
     def _migrate_schema(self, version: int) -> None:
-        if version != 1:
+        if version not in (1, 2):
             raise RuntimeError(f"No catalog migration is available from schema {version}.")
-        study_columns = _columns(self.connection, "study")
-        snapshot_columns = _columns(self.connection, "source_snapshot")
-        if "current_snapshot_id" not in study_columns:
-            self.connection.execute(
-                "ALTER TABLE study ADD COLUMN current_snapshot_id TEXT NOT NULL DEFAULT ''"
-            )
-        if "source_blob_hash" not in snapshot_columns:
-            self.connection.execute(
-                "ALTER TABLE source_snapshot ADD COLUMN source_blob_hash TEXT NOT NULL DEFAULT ''"
-            )
+        # Every step is additive and checks for its column first, so a database whose tables were
+        # created by a newer BASE_SCHEMA and then labelled older migrates without error.
+        if version < 2:
+            if "current_snapshot_id" not in _columns(self.connection, "study"):
+                self.connection.execute(
+                    "ALTER TABLE study ADD COLUMN current_snapshot_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "source_blob_hash" not in _columns(self.connection, "source_snapshot"):
+                self.connection.execute(
+                    "ALTER TABLE source_snapshot ADD COLUMN source_blob_hash TEXT NOT NULL DEFAULT ''"
+                )
+        # Schema 3: who ratified a Class proposal (a campaign approval standing in for boundary 3),
+        # and the analysis_run columns its writer fills. Existing proposals read unratified: they
+        # were confirmed in a conversation, and nothing recorded which one.
+        for table, column, definition in (
+            ("class_proposal", "ratified_by", "TEXT NOT NULL DEFAULT ''"),
+            ("class_proposal", "ratification_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("analysis_run", "status", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_run", "gate_verdict", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_run", "gate_exit_code", "INTEGER"),
+            ("analysis_run", "output_paths_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("analysis_run", "recorded_at", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_run", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in _columns(self.connection, table):
+                self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self.connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     def source_hash(self, repository: str, accession: str) -> str:
@@ -163,6 +180,7 @@ class Catalog:
             "samples": self.connection.execute("SELECT COUNT(*) FROM sample").fetchone()[0],
             "raw_files": self.connection.execute("SELECT COUNT(*) FROM raw_file").fetchone()[0],
             "class_proposals": self.connection.execute("SELECT COUNT(*) FROM class_proposal").fetchone()[0],
+            "analysis_runs": self.connection.execute("SELECT COUNT(*) FROM analysis_run").fetchone()[0],
             "source_blobs": self.connection.execute("SELECT COUNT(*) FROM source_blob").fetchone()[0],
         }
 
@@ -758,26 +776,59 @@ class Catalog:
         """Distinct objects and sharing groups for a list of units; see the module-level download_plan."""
         return download_plan(self.connection, unit_ids)
 
-    def save_class_proposal(self, proposal: ClassProposal) -> None:
-        from .class_proposal import validate_class_proposal
+    def save_class_proposal(
+        self, proposal: ClassProposal, *, ratification: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Save a proposal; with `ratification`, record the campaign approval that accepted it.
 
+        Returns the ratification record stored with it, or None. A ratified proposal must already
+        read accepted: the ratification is the acceptance, and a ratified "proposed" row would say
+        both that it was and was not agreed to.
+        """
+        from .class_proposal import is_abstention, validate_class_proposal
+
+        record = None
+        if ratification is not None:
+            record = ratification_record(
+                ratification, proposal.proposal_id, abstention=is_abstention(proposal)
+            )
+            if proposal.status != ACCEPTED_STATUS:
+                raise ValueError(
+                    f"A ratified Class proposal is an accepted one; this one reads {proposal.status!r}."
+                )
         validate_class_proposal(self.get_unit(proposal.unit_id), proposal)
         with self.connection:
+            # An unratified save of a proposal that stays accepted keeps the ratification already
+            # recorded for it: a person confirming the same grouping again does not un-ratify it. A
+            # save that leaves it anything but accepted clears it.
             self.connection.execute(
                 """
-                INSERT INTO class_proposal VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO class_proposal(
+                    proposal_id, unit_id, purpose, selected_fields_json, rationale,
+                    contrast_definition_json, model, prompt_hash, status, warnings_json,
+                    created_at, ratified_by, ratification_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(proposal_id) DO UPDATE SET
                     selected_fields_json=excluded.selected_fields_json,
                     rationale=excluded.rationale,
                     contrast_definition_json=excluded.contrast_definition_json,
                     model=excluded.model, prompt_hash=excluded.prompt_hash,
-                    status=excluded.status, warnings_json=excluded.warnings_json
+                    status=excluded.status, warnings_json=excluded.warnings_json,
+                    ratified_by=CASE
+                        WHEN excluded.ratified_by <> '' THEN excluded.ratified_by
+                        WHEN excluded.status = 'accepted' THEN class_proposal.ratified_by
+                        ELSE '' END,
+                    ratification_json=CASE
+                        WHEN excluded.ratified_by <> '' THEN excluded.ratification_json
+                        WHEN excluded.status = 'accepted' THEN class_proposal.ratification_json
+                        ELSE '{}' END
                 """,
                 (
                     proposal.proposal_id, proposal.unit_id, proposal.purpose,
                     _json(proposal.selected_fields), proposal.rationale,
                     _json(proposal.contrast_definition), proposal.model, proposal.prompt_hash,
                     proposal.status, _json(proposal.warnings), datetime.now(timezone.utc).isoformat(),
+                    record["approval_id"] if record else "", _json(record or {}),
                 ),
             )
             self.connection.execute(
@@ -790,6 +841,7 @@ class Catalog:
                     for item in proposal.assignments
                 ],
             )
+        return record
 
     def get_class_proposal(self, proposal_id: str) -> dict[str, Any]:
         self.initialize()
@@ -805,6 +857,8 @@ class Catalog:
             ("warnings_json", "warnings"),
         ):
             result[target] = json.loads(result.pop(source))
+        # None, not {}, for a proposal confirmed in a conversation: nothing recorded who confirmed it.
+        result["ratification"] = json.loads(result.pop("ratification_json") or "{}") or None
         result["assignments"] = [
             {
                 **dict(assignment),
@@ -817,6 +871,153 @@ class Catalog:
         ]
         for assignment in result["assignments"]:
             assignment.pop("values_json", None)
+        return result
+
+    def record_analysis_run(
+        self,
+        run_id: str,
+        *,
+        unit_id: str,
+        status: str,
+        class_proposal_id: str = "",
+        msdial_version: str = "",
+        interactive_version: str = "",
+        parameter_hash: str = "",
+        parameter_file: str = "",
+        mztab_path: str = "",
+        mztab_sha256: str = "",
+        qa_status: str = "",
+        gate_verdict: str = "",
+        gate_exit_code: int | None = None,
+        output_paths: dict[str, str] | None = None,
+        started_at: str = "",
+        completed_at: str = "",
+        provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Write one production run's record into analysis_run, idempotently on `run_id`.
+
+        `run_id` is '<unit>[-part]:<production_job_id>' and `unit_id` the catalog unit, the parent for
+        a split part. Recording the same values again changes nothing, updated_at included. A later
+        call for the same run id updates it: every value it passes replaces the stored one, a value it
+        leaves empty keeps what is stored, and output_paths and provenance merge key by key -- so a
+        runner can record a run when it starts and complete the record when the gate has read it.
+
+        Paths are relative to the unit's workspace, and no value may carry an absolute location:
+        these rows live beside the catalog, and a drive, UNC or file:// path (a private library's,
+        above all) must not travel with it. `completed` is reserved for a run whose gate --strict
+        exited 0; a run held only for a person's reading is not completed, and its status says so.
+        """
+        run = str(run_id or "").strip()
+        unit = str(unit_id or "").strip()
+        head, separator, job = run.partition(":")
+        if (
+            not unit or not separator or not job or any(character.isspace() for character in run)
+            or not (head == unit or (head.startswith(unit + "-") and len(head) > len(unit) + 1))
+        ):
+            raise ValueError(
+                f"A run id is '<unit>[-part]:<production_job_id>' for unit {unit or '(none)'}; got {run!r}."
+            )
+        values: dict[str, Any] = {
+            "class_proposal_id": class_proposal_id, "msdial_version": msdial_version,
+            "interactive_version": interactive_version, "parameter_hash": parameter_hash,
+            "parameter_file": _relative_path(parameter_file, "parameter_file"),
+            "mztab_path": _relative_path(mztab_path, "mztab_path"),
+            "mztab_sha256": str(mztab_sha256 or "").strip().casefold(),
+            "qa_status": _run_token(qa_status, "qa_status"),
+            "gate_verdict": _run_token(gate_verdict, "gate_verdict"),
+            "started_at": started_at, "completed_at": completed_at,
+        }
+        values = {key: str(value or "").strip() for key, value in values.items()}
+        if values["mztab_sha256"] and not re.fullmatch(r"[0-9a-f]{64}", values["mztab_sha256"]):
+            raise ValueError("mztab_sha256 is 64 hex digits.")
+        state = _run_token(status, "status")
+        if not state:
+            raise ValueError("A run record states the run's status.")
+        for name, value in (("output_paths", output_paths), ("provenance", provenance)):
+            if value is not None and not isinstance(value, dict):
+                raise ValueError(f"{name} is an object keyed by name.")
+        paths = {
+            str(key).strip(): _relative_path(value, f"output_paths[{key}]")
+            for key, value in dict(output_paths or {}).items()
+        }
+        if "" in paths:
+            raise ValueError("Each output path is named.")
+        for value in [*values.values(), *_strings(provenance or {})]:
+            if _ABSOLUTE_LOCATION.search(value):
+                raise ValueError(
+                    f"A run record carries no absolute location, and {value!r} is one; record paths "
+                    "relative to the workspace, and libraries by name and sha256."
+                )
+        if gate_exit_code is not None and (isinstance(gate_exit_code, bool) or not isinstance(gate_exit_code, int)):
+            raise ValueError("gate_exit_code is the gate's integer exit code.")
+
+        self.initialize()
+        if self.connection.execute(
+            "SELECT 1 FROM analysis_unit WHERE unit_id = ?", (unit,)
+        ).fetchone() is None:
+            raise KeyError(f"Unknown analysis unit: {unit}")
+        stored = self.connection.execute(
+            "SELECT * FROM analysis_run WHERE run_id = ?", (run,)
+        ).fetchone()
+        stored = dict(stored) if stored is not None else None
+        if stored is not None and stored["unit_id"] != unit:
+            raise ValueError(f"Run {run} is recorded for unit {stored['unit_id']}, not {unit}.")
+        previous = stored or {}
+        row = {
+            key: value or str(previous.get(key) or "")
+            for key, value in values.items()
+        }
+        row["qa_status"] = row["qa_status"] or "not_evaluated"
+        if row["class_proposal_id"]:
+            owner = self.connection.execute(
+                "SELECT unit_id FROM class_proposal WHERE proposal_id = ?", (row["class_proposal_id"],)
+            ).fetchone()
+            if owner is None or owner[0] != unit:
+                raise ValueError(
+                    f"Class proposal {row['class_proposal_id']} is not a saved proposal of unit {unit}."
+                )
+        exit_code = gate_exit_code if gate_exit_code is not None else previous.get("gate_exit_code")
+        if state == "completed" and exit_code != 0:
+            raise ValueError(
+                "A run is completed only when the gate --strict exited 0; this one's gate exit code is "
+                f"{exit_code}. Record the state it is in instead."
+            )
+        row.update(
+            run_id=run,
+            unit_id=unit,
+            status=state,
+            gate_exit_code=exit_code,
+            catalog_schema_version=SCHEMA_VERSION,
+            output_paths_json=_json({**json.loads(previous.get("output_paths_json") or "{}"), **paths}),
+            provenance_json=_json({**json.loads(previous.get("provenance_json") or "{}"), **(provenance or {})}),
+        )
+        row["class_proposal_id"] = row["class_proposal_id"] or None
+        unchanged = stored is not None and all(stored.get(key) == value for key, value in row.items())
+        if not unchanged:
+            now = datetime.now(timezone.utc).isoformat()
+            row["recorded_at"] = previous.get("recorded_at") or now
+            row["updated_at"] = now
+            columns = list(row)
+            with self.connection:
+                self.connection.execute(
+                    f"INSERT INTO analysis_run({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
+                    "ON CONFLICT(run_id) DO UPDATE SET "
+                    + ", ".join(f"{column}=excluded.{column}" for column in columns if column != "run_id"),
+                    [row[column] for column in columns],
+                )
+        return {"created": stored is None, "written": not unchanged, "run": self.get_analysis_run(run)}
+
+    def get_analysis_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        row = self.connection.execute(
+            "SELECT * FROM analysis_run WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown analysis run: {run_id}")
+        result = dict(row)
+        result["class_proposal_id"] = result["class_proposal_id"] or ""
+        result["output_paths"] = json.loads(result.pop("output_paths_json") or "{}")
+        result["provenance"] = json.loads(result.pop("provenance_json") or "{}")
         return result
 
     def snapshot(
@@ -860,6 +1061,9 @@ class Catalog:
                     target.execute("DELETE FROM class_assignment")
                     target.execute("DELETE FROM class_proposal")
                     target.execute("DELETE FROM manual_override")
+                    # A run record is this machine's reanalysis, not repository metadata, and it
+                    # names local workspaces: it travels only with the other local decisions.
+                    target.execute("DELETE FROM analysis_run")
                 target.commit()
                 target.execute("VACUUM")
                 study_count = target.execute("SELECT COUNT(*) FROM study").fetchone()[0]
@@ -1235,6 +1439,39 @@ def _byte_totals(objects: list[dict[str, Any]]) -> dict[str, int]:
 
 def _chunks(values: list[str]) -> list[list[str]]:
     return [values[index:index + _QUERY_CHUNK] for index in range(0, len(values), _QUERY_CHUNK)]
+
+
+# A drive path (D:\ or D:/, not the "s:/" of https://), a UNC or \\?\ prefix, or a file:// URI.
+_ABSOLUTE_LOCATION = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\[^\\\s]|file://", re.IGNORECASE)
+_RUN_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
+
+
+def _relative_path(value: Any, field: str) -> str:
+    """A path relative to the unit's workspace, in POSIX form, or ValueError."""
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if text.startswith("/") or ":" in text or ".." in PurePosixPath(text).parts:
+        raise ValueError(f"{field} is a path relative to the unit's workspace, not {text!r}.")
+    return text
+
+
+def _run_token(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if text and not _RUN_TOKEN.fullmatch(text):
+        raise ValueError(f"{field} is one lowercase token such as 'completed' or 'failed', not {text!r}.")
+    return text
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string in a JSON-shaped value, keys included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in (*_strings(str(key)), *_strings(item))]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
 
 
 def _json(value: Any, indent: int | None = None) -> str:

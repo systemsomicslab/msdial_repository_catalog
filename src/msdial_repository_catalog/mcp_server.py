@@ -18,16 +18,9 @@ from .class_proposal import (
 from .class_selection import abstention_record, automatic_class_proposal, select_class_fields
 
 from .models import ClassAssignment, ClassProposal, stable_id
+from .ratification import ACCEPTED_STATUS, RatificationError, normalize_ratification
 from .storage import Catalog
 from .update_jobs import REPOSITORIES, UpdateJobManager
-
-
-# A proposal reaches this module reading "proposed", which is what ClassProposal is born as.
-# Saving is gated on an explicit confirmation, and that confirmation was the only record that
-# anyone had agreed to the grouping -- it lived in a conversation and in nothing an audit could
-# read. A machine-authored grouping executed and published beside a proposal still reading
-# "proposed" is the whole of the safety argument missing.
-ACCEPTED_STATUS = "accepted"
 
 DEFAULT_DATABASE = Path(
     os.environ.get(
@@ -297,6 +290,7 @@ def msdial_catalog_save_class_proposal(
     confirmed: bool = False,
     database: str = "",
     abstain: bool = False,
+    ratification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate and save an agent Class proposal only after explicit user confirmation.
 
@@ -309,7 +303,36 @@ def msdial_catalog_save_class_proposal(
     sample in one Class, with the reason and the factors considered. It is saved only where the
     catalog abstains, and only after the same confirmation, because declining to compare is a
     decision the person ratifies like a grouping.
+
+    `ratification` is a campaign approval standing in for that confirmation, for a campaign that
+    cannot ask a person once per unit: {"approval_id", "manifest_digest"} of the
+    msdial-campaign-authorization.v1 record the person approved, optionally "authorization_sha256"
+    (of that record as read), "campaign_id", and "proposal_id" (the Class digest the approved
+    manifest names for this unit; a different proposal is refused). A ratified save needs no
+    confirmed=true, for a proposal or an abstention alike; the ratification is stored with the
+    proposal and returned. One that lacks the approval id or the digest is refused, never ignored.
     """
+    try:
+        checked = normalize_ratification(ratification)
+    except RatificationError as error:
+        return {"saved": False, "ratification_refused": error.codes, "message": str(error)}
+    # The campaign approval is the confirmation; without one, nothing here changes.
+    approved = confirmed or checked is not None
+
+    def save(proposal: ClassProposal, **extra: Any) -> dict[str, Any]:
+        proposal.status = ACCEPTED_STATUS
+        try:
+            with Catalog(_database(database)) as catalog:
+                stored = catalog.save_class_proposal(
+                    proposal, ratification=ratification if checked is not None else None
+                )
+        except RatificationError as error:
+            return {"saved": False, "ratification_refused": error.codes, "message": str(error)}
+        result = {"saved": True, **extra, "proposal": proposal.as_dict()}
+        if stored is not None:
+            result["ratification"] = stored
+        return result
+
     assignments_payload = json.loads(assignments_json) if assignments_json.strip() else []
     contrast = json.loads(contrast_definition_json or "{}")
     with Catalog(_database(database)) as catalog:
@@ -330,7 +353,7 @@ def msdial_catalog_save_class_proposal(
                     "to record. Review and save that proposal instead."
                 ),
             }
-        if not confirmed:
+        if not approved:
             return {
                 "confirmation_required": True,
                 "abstention_preview": {
@@ -348,10 +371,7 @@ def msdial_catalog_save_class_proposal(
                     "will take one Class."
                 ),
             }
-        record.status = ACCEPTED_STATUS
-        with Catalog(_database(database)) as catalog:
-            catalog.save_class_proposal(record)
-        return {"saved": True, "abstention": True, "proposal": record.as_dict()}
+        return save(record, abstention=True)
     if contrast.get("kind") == ABSTENTION_KIND:
         # An abstention is the catalog's own record of its selection, never an agent's contrast.
         return {"saved": False, "message": "An abstention is recorded with abstain=True, not as a contrast definition."}
@@ -380,7 +400,7 @@ def msdial_catalog_save_class_proposal(
                 proposal.model = model
             if rationale.strip():
                 proposal.rationale = rationale
-        if not confirmed:
+        if not approved:
             counts: dict[str, int] = {}
             for item in proposal.assignments:
                 counts[item.class_label] = counts.get(item.class_label, 0) + 1
@@ -402,11 +422,8 @@ def msdial_catalog_save_class_proposal(
                     else "Review the deterministic field projection before saving it."
                 ),
             }
-        proposal.status = ACCEPTED_STATUS
-        with Catalog(_database(database)) as catalog:
-            catalog.save_class_proposal(proposal)
-        return {"saved": True, "proposal": proposal.as_dict()}
-    if not confirmed:
+        return save(proposal)
+    if not approved:
         return {
             "confirmation_required": True,
             "message": "Review the selected fields, every sample assignment, rationale, and contrast before saving.",
@@ -442,11 +459,8 @@ def msdial_catalog_save_class_proposal(
         model=model,
         prompt_hash=hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
     )
-    proposal.status = ACCEPTED_STATUS
-    with Catalog(_database(database)) as catalog:
-        validate_class_proposal(unit, proposal)
-        catalog.save_class_proposal(proposal)
-    return {"saved": True, "proposal": proposal.as_dict()}
+    validate_class_proposal(unit, proposal)
+    return save(proposal)
 
 
 @tool()
@@ -602,6 +616,62 @@ def msdial_catalog_reanalysis_handoff(
     # handoff file, which is what Interactive reads.
     response["download_scope"] = {**payload["download_scope"], "objects": [], "objects_omitted": True}
     return response
+
+
+@tool()
+def msdial_catalog_record_analysis_run(
+    run_id: str,
+    unit_id: str,
+    status: str,
+    class_proposal_id: str = "",
+    msdial_version: str = "",
+    interactive_version: str = "",
+    parameter_hash: str = "",
+    parameter_file: str = "",
+    mztab_path: str = "",
+    mztab_sha256: str = "",
+    qa_status: str = "",
+    gate_verdict: str = "",
+    gate_exit_code: int | None = None,
+    output_paths: dict[str, str] | None = None,
+    started_at: str = "",
+    completed_at: str = "",
+    provenance: dict[str, Any] | None = None,
+    database: str = "",
+) -> dict[str, Any]:
+    """Record one production MS-DIAL run of a catalog unit in analysis_run. Local only; nothing runs.
+
+    `run_id` is '<unit>[-part]:<production_job_id>' and `unit_id` the catalog unit (the parent of a
+    split part). Idempotent on run_id: the same record twice changes nothing, and a later call adds
+    or replaces what it passes. Paths are relative to the unit's workspace and no value may carry an
+    absolute location. `completed` is reserved for a gate --strict exit 0; a run held only for a
+    person's reading is recorded under a status that says so. Run records stay out of catalog
+    snapshots unless local decisions are included.
+    """
+    try:
+        with Catalog(_database(database)) as catalog:
+            result = catalog.record_analysis_run(
+                run_id,
+                unit_id=unit_id,
+                status=status,
+                class_proposal_id=class_proposal_id,
+                msdial_version=msdial_version,
+                interactive_version=interactive_version,
+                parameter_hash=parameter_hash,
+                parameter_file=parameter_file,
+                mztab_path=mztab_path,
+                mztab_sha256=mztab_sha256,
+                qa_status=qa_status,
+                gate_verdict=gate_verdict,
+                gate_exit_code=gate_exit_code,
+                output_paths=output_paths,
+                started_at=started_at,
+                completed_at=completed_at,
+                provenance=provenance,
+            )
+    except (KeyError, ValueError, TypeError) as error:
+        return {"recorded": False, "message": str(error).strip("'\"")}
+    return {"recorded": True, **result}
 
 
 def _publication_status(unit: dict[str, Any]) -> str:

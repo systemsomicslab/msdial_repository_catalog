@@ -74,6 +74,12 @@ and snapshots are updated in batches. `--vacuum` reclaims free pages and needs
 additional temporary disk space. Back up the database first and never run it
 against a GUI or scheduler process that is still writing.
 
+Schema migration from version 2 to 3 is additive too: it adds the Class
+proposal ratification columns and the `analysis_run` status, gate and path
+columns, and rewrites no row. It runs when a schema-3 Catalog first opens the
+database, after which an older Catalog refuses it, so stop every GUI, CLI, MCP
+and scheduler process of the older version first.
+
 ## Update scopes
 
 - `indexed`: refresh only locally known accessions.
@@ -91,4 +97,5 @@ Git contains code, schemas, migrations, documentation, and small release
 manifests. It does not contain generated SQLite/WAL files. Thin catalog assets
 can be published separately. User decisions remain local and are omitted from
 standard snapshots so replacing a downloaded catalog does not publish or
-overwrite analysis-specific judgments.
+overwrite analysis-specific judgments. `analysis_run` records are local in the
+same way: a snapshot without local decisions leaves them out.

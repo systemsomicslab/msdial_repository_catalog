@@ -34,6 +34,31 @@ The accepted proposal records model identity and prompt hash. Re-running an
 agent creates a new proposal; it does not mutate the repository metadata or the
 previous decision.
 
+## Ratification by a campaign approval
+
+Saving a proposal or an abstention is confirmation boundary 3. In a campaign,
+one approval of one campaign manifest digest (MS-DIAL Interactive's
+`msdial-campaign-authorization.v1` record) stands in for the per-unit
+confirmation. `msdial_catalog_save_class_proposal` then takes a `ratification`
+instead of `confirmed=true`:
+
+```json
+{"approval_id": "...", "manifest_digest": "sha256:<64 lowercase hex>",
+ "authorization_sha256": "<optional>", "campaign_id": "<optional>",
+ "proposal_id": "<optional: the Class digest the approved manifest names>"}
+```
+
+A ratified save needs no confirmation, for a proposal and an abstention alike.
+The ratification is stored with the proposal (`ratified_by` is the approval id,
+`ratification_json` the full record, boundary 3) and returned by the save, by
+`get_class_proposal` and in the handoff's `class_proposal`. A ratification
+without the approval id or the digest, with a digest in any other form, with
+keys other than these, or naming a different `proposal_id` is refused and
+saves nothing, even with `confirmed=true`. The Catalog records the approval; it
+does not read the authorization record, which the campaign runner validates.
+Without a ratification nothing changed: saving still needs `confirmed=true`,
+and a proposal confirmed in a conversation reads `ratification: null`.
+
 ## MCP integration
 
 The initial MCP surface exposes:
@@ -44,6 +69,7 @@ The initial MCP surface exposes:
 - `msdial_catalog_class_request`
 - `msdial_catalog_save_class_proposal`
 - `msdial_catalog_reanalysis_handoff`
+- `msdial_catalog_record_analysis_run`
 
 The handoff never downloads raw data; the receiving MS-DIAL Interactive
 workflow applies its own confirmation and bundle-aware size limits. The MCP
