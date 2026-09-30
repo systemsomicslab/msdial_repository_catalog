@@ -29,6 +29,9 @@ from msdial_repository_catalog.storage import Catalog, download_plan
 
 WORKBENCH = "https://www.metabolomicsworkbench.org/studydownload/"
 GB = 1024**3
+EMPTY_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
+EMPTY_SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def workbench_study() -> dict:
@@ -249,7 +252,7 @@ class TheSizeRuleIsPerPath(unittest.TestCase):
         )
         connection.executemany(
             "INSERT INTO analysis_unit (unit_id, study_id, source_subrecord_id, signature) VALUES (?, 's', ?, 'x')",
-            [("u1", "u1"), ("u2", "u2"), ("u3", "u3")],
+            [("u1", "u1"), ("u2", "u2"), ("u3", "u3"), ("u4", "u4"), ("u5", "u5"), ("u6", "u6")],
         )
         connection.executemany(
             "INSERT INTO raw_file (file_id, unit_id, path, size_bytes, checksum, download_url) VALUES (?, ?, ?, ?, ?, ?)",
@@ -270,6 +273,18 @@ class TheSizeRuleIsPerPath(unittest.TestCase):
                 # A unit with one file of listed size and URL, and one whose row carries no URL.
                 ("f9", "u3", "e.raw", 7, "", "https://example.org/e.raw"),
                 ("f10", "u3", "f.raw", 11, "", ""),
+                # A Bruker folder whose markers carry the SHA-1 and SHA-256 of zero bytes, beside a
+                # member of listed size: MTBKS219/220 list 1,421 such markers in the declared pool.
+                ("f11", "u4", "y.d/SyncHelper", 0, EMPTY_SHA1, "https://example.org/y.d/SyncHelper"),
+                ("f12", "u4", "y.d/y.d", 0, EMPTY_SHA256, "https://example.org/y.d/y.d"),
+                ("f13", "u4", "y.d/lock.file", 0, EMPTY_MD5, "https://example.org/y.d/lock.file"),
+                ("f14", "u4", "y.d/analysis.tdf", 100, "f" * 32, "https://example.org/y.d/analysis.tdf"),
+                # Zeros that no empty digest vouches for: no checksum, and the MD5 of other content.
+                ("f15", "u5", "v.mzML", 0, "", "https://example.org/v.mzML"),
+                ("f16", "u5", "t.mzML", 0, "a" * 32, "https://example.org/t.mzML"),
+                # Two rows of one marker: one says it is empty, the other declares other content.
+                ("f17", "u5", "w.d/lock.file", 0, EMPTY_MD5, "https://example.org/w.d/lock.file"),
+                ("f18", "u6", "w.d/lock.file", 0, "b" * 32, "https://example.org/w.d/lock.file"),
             ],
         )
         connection.commit()
@@ -291,25 +306,83 @@ class TheSizeRuleIsPerPath(unittest.TestCase):
         self.assertIsNone(item["bytes"])
         self.assertEqual(10, item["known_bytes"], "the stated part, as a lower bound")
 
-    def test_a_zero_with_the_empty_checksum_is_still_no_listed_size(self) -> None:
+    def test_a_zero_with_the_empty_checksum_is_a_known_zero(self) -> None:
+        """Decided by the user on 2026-09-30: the listed 0 and the digest of empty content agree."""
         (item,) = self.catalog.download_objects(["https://example.org/x.d/lock.file"])
 
-        self.assertFalse(item["size_known"], "the MD5 of zero bytes is evidence, not a listed size")
-        self.assertIsNone(item["bytes"])
-        self.assertEqual((0, 1, 1), (item["known_bytes"], item["unknown_size_paths"], item["empty_digest_paths"]),
-                         "reported apart, for a disk guard whose policy accepts it")
+        self.assertTrue(item["size_known"], "the MD5 of zero bytes vouches for the listed 0")
+        self.assertEqual(0, item["bytes"])
+        self.assertEqual((0, 0, 1), (item["known_bytes"], item["unknown_size_paths"], item["empty_digest_paths"]),
+                         "counted apart, and not among the unknown")
         self.assertEqual(("md5", "object"), (item["checksum_algorithm"], item["checksum_scope"]))
 
-    def test_the_totals_count_objects_empty_only_by_digest_apart(self) -> None:
+    def test_every_digest_of_empty_content_counts(self) -> None:
+        items = {
+            item["path"]: item
+            for item in self.catalog.download_objects(
+                ["https://example.org/y.d/SyncHelper", "https://example.org/y.d/y.d"]
+            )
+        }
+
+        for path, algorithm in (("y.d/SyncHelper", "sha1"), ("y.d/y.d", "sha256")):
+            with self.subTest(algorithm):
+                self.assertEqual((True, 0, 1), (items[path]["size_known"], items[path]["bytes"], items[path]["empty_digest_paths"]))
+                self.assertEqual(algorithm, items[path]["checksum_algorithm"])
+
+    def test_a_zero_without_an_empty_digest_is_still_no_size(self) -> None:
+        items = {
+            item["path"]: item
+            for item in self.catalog.download_objects(["https://example.org/v.mzML", "https://example.org/t.mzML"])
+        }
+
+        for path in ("v.mzML", "t.mzML"):
+            with self.subTest(path):
+                self.assertFalse(items[path]["size_known"], "no checksum, or one of other content, is no size")
+                self.assertIsNone(items[path]["bytes"])
+                self.assertEqual((1, 0), (items[path]["unknown_size_paths"], items[path]["empty_digest_paths"]))
+
+    def test_an_empty_digest_another_row_contradicts_is_no_size(self) -> None:
+        (item,) = self.catalog.download_objects(["https://example.org/w.d/lock.file"])
+
+        self.assertFalse(item["size_known"], "one row says empty, the other declares other content")
+        self.assertIsNone(item["bytes"])
+        self.assertEqual((1, 0), (item["unknown_size_paths"], item["empty_digest_paths"]))
+        self.assertEqual("conflicting", item["checksum_scope"])
+
+    def test_the_totals_count_objects_known_empty_by_digest(self) -> None:
         plan = download_plan(self.catalog.connection, ["u1"])
         (unit,) = plan["units"]
         (bundle,) = self.catalog.download_objects(["https://example.org/bundle"])
 
-        self.assertEqual((2, 1), (plan["unknown_size_objects"], plan["empty_digest_objects"]),
+        self.assertEqual((1, 1), (plan["unknown_size_objects"], plan["empty_digest_objects"]),
                          "the bundle's unlisted member carries no checksum; lock.file carries the empty MD5")
-        self.assertEqual((2, 1), (unit["unknown_size_objects"], unit["empty_digest_objects"]))
-        self.assertFalse(unit["size_known"])
+        self.assertEqual((1, 1), (unit["unknown_size_objects"], unit["empty_digest_objects"]))
+        self.assertFalse(unit["size_known"], "the bundle is still of unknown size")
         self.assertEqual(0, bundle["empty_digest_paths"])
+
+    def test_a_unit_whose_only_zeros_are_empty_by_digest_is_of_known_size(self) -> None:
+        """The MTBKS219/220 shape: every 0 in the unit is a Bruker marker carrying an empty digest."""
+        plan = download_plan(self.catalog.connection, ["u4"])
+        (unit,) = plan["units"]
+        urls = [
+            str(url) for (url,) in self.catalog.connection.execute(
+                "SELECT download_url FROM raw_file WHERE unit_id = 'u4' ORDER BY path"
+            )
+        ]
+        scope = self.catalog.download_scope(urls)
+
+        self.assertEqual((True, 100, 0, 3), (unit["size_known"], unit["bytes"], unit["unknown_size_objects"], unit["empty_digest_objects"]))
+        self.assertEqual(0, plan["units_of_unknown_size"])
+        self.assertEqual((True, 100), (scope["bundle_size_known"], scope["bundle_bytes"]))
+        self.assertEqual((0, 3), (scope["unknown_size_object_count"], scope["empty_digest_object_count"]))
+
+    def test_a_unit_with_a_zero_no_empty_digest_vouches_for_stays_unknown(self) -> None:
+        plan = download_plan(self.catalog.connection, ["u5"])
+        (unit,) = plan["units"]
+
+        self.assertFalse(unit["size_known"])
+        self.assertIsNone(unit["bytes"])
+        self.assertEqual((3, 0), (unit["unknown_size_objects"], unit["empty_digest_objects"]))
 
     def test_a_file_without_a_url_leaves_its_unit_of_unknown_size(self) -> None:
         plan = download_plan(self.catalog.connection, ["u3"])
