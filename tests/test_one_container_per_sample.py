@@ -197,6 +197,11 @@ class SharedVectorTests(unittest.TestCase):
                         case["conversion_target"],
                         {path: item["conversion_target"] for path, item in result.items() if "conversion_target" in item},
                     )
+                if "unpacks_to" in case:
+                    self.assertEqual(
+                        case["unpacks_to"],
+                        {path: item["unpacks_to"] for path, item in result.items() if "unpacks_to" in item},
+                    )
 
 
 if __name__ == "__main__":  # pragma: no cover

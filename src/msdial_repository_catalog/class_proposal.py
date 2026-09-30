@@ -212,7 +212,9 @@ def analysis_samples(unit: dict[str, Any]) -> list[dict[str, Any]]:
     """Return one metadata row per MS-DIAL analysis input.
 
     A row that names a folder the file listing lacks, or a second row naming one folder, is kept as
-    well, and the unit's analysis_input_issues say so.
+    well, and the unit's analysis_input_issues say so. A row naming the directory other rows'
+    inputs sit in is dropped, as it always was; the view keeps it in `excluded_samples`, and the
+    issues say that too.
     """
     return _project_analysis_inputs(unit)["samples"]
 
@@ -222,7 +224,15 @@ def analysis_inputs(unit: dict[str, Any]) -> list[dict[str, Any]]:
 
     Each entry names what MS-DIAL opens (`path`, relative to the download root), its `kind`, the
     container `suffix`, the vendor `format` read from a folder's member names, how many listed
-    files make it up and their bytes, and the sample row that names it.
+    files make it up and their bytes, and the sample row that names it. A file or packed container
+    also says whether it `requires_conversion` and its `conversion_target` ("" when none is
+    planned).
+
+    THE TOKENS A SPLIT HINT IS KEYED ON. A vendor folder's `format` is UNKNOWN_FORMAT ("unknown")
+    when its member names do not say, never "", and split_hint.groups counts it under the same
+    token; every other input has format "", which no group ever uses, because only vendor folders
+    are split by format. A split by `suffix` counts vendor containers by their suffix (".raw",
+    ".wiff"), and a converted or unrecognised input belongs to no group either.
     """
     return _project_analysis_inputs(unit)["inputs"]
 
@@ -270,27 +280,46 @@ MEMBER_ROLES = frozenset({VENDOR_FOLDER_MEMBER_ROLE, DIRECTORY_MEMBER_ROLE})
 
 # A per-sample archive of one container -- x.d.zip, x.raw.rar, x.mzML.gz -- is that container
 # packed: one sample and one input, the container it unpacks to. MetaboLights publishes 37,000 of
-# them. Longest first, so that x.d.tar.gz is a tar.gz of x.d and not a gzip of x.d.tar.
+# them. Longest first, so that x.d.tar.gz is a tar.gz of x.d and not a gzip of x.d.tar. MTBLS688
+# packs the 2,263 derived mzXML files of each of its two LC-MS units as x.mzXML.lzma.
 PACKED_ARCHIVE_SUFFIXES: tuple[str, ...] = (
-    ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+    ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".rar", ".7z", ".tar", ".lzma", ".gz",
+    ".bz2", ".xz",
 )
+
+# WHAT TRAVELS WITH A SCIEX ACQUISITION. A .wiff.scan holds the spectra of its .wiff, and a
+# .timeseries.data travels with a .wiff2; neither is opened on its own, so neither is an input,
+# competes, or is marked for conversion, although ".scan" alone is a format MS-DIAL cannot read.
+# .wiff2.scan is a sidecar as Interactive's _is_sidecar_name reads it. Packed, they are the same
+# files: x.wiff.scan.zip was an input of its own, flagged for conversion, and Interactive excluded
+# the whole SCIEX unit for it.
+SIDECAR_SUFFIXES: tuple[str, ...] = (".wiff2.scan", ".wiff.scan")
+AUXILIARY_SUFFIXES: tuple[str, ...] = (".timeseries.data",)
 
 ANALYSIS_INPUT_MODEL = "one-input-per-sample.v1"
 
 # WHAT STOPS A UNIT, AND WHAT ONLY WARNS. A folder two sample rows name, a sample row whose folder
 # is not listed, a listed folder that no row names, and a declared directory that is not an MS-DIAL
 # container each mean the sample table and the file listing disagree about what was measured, and a
-# run would have to guess which row is which injection. Mixed container formats do not: MTBKS219
-# mixes Bruker BAF (timsOFF) and TDF (timsON) folders, two ion-mobility regimes in one unit, and the
-# remedy is to split it by format rather than to exclude it. It travels as a warning with a split
-# hint, because a blocker would take four of the eight in-scope folder units out of the campaign.
+# run would have to guess which row is which injection. Mixed containers do not: MTBKS219 mixes
+# Bruker BAF (timsOFF) and TDF (timsON) folders, two ion-mobility regimes in one unit, and MTBKS222
+# lists Waters folders beside SCIEX .wiff files; the remedy is to split the unit rather than to
+# exclude it. Each travels as a warning with a split hint, because a blocker would take four of the
+# eight in-scope folder units out of the campaign. A row naming the directory other rows' inputs
+# sit in (raw/) names no sample, and is dropped with a warning, as it always was.
 BLOCKING_INPUT_ISSUES: tuple[str, ...] = (
     "container_shared_by_samples",
     "sample_without_container",
     "container_without_sample",
     "declared_directory_not_msdial_input",
 )
-WARNING_INPUT_ISSUES: tuple[str, ...] = ("mixed_container_formats",)
+WARNING_INPUT_ISSUES: tuple[str, ...] = (
+    "mixed_container_formats",
+    "mixed_container_suffixes",
+    "parent_directory_row",
+)
+# The format of a vendor folder whose member names do not say which it is.
+UNKNOWN_FORMAT = "unknown"
 
 # The inputs that are directories the listing enumerates. A per-sample archive is one published
 # file like any other, and is attributed like one: a second row naming it is not a second injection,
@@ -302,6 +331,12 @@ _MEMBER_CANDIDATE_ROLES = frozenset({"raw", "sidecar", "auxiliary", "raw_alterna
 _ALL_CONTAINER_SUFFIXES: tuple[str, ...] = tuple(
     sorted(VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES + UNREADABLE_SUFFIXES, key=len, reverse=True)
 )
+_TRAVELLING_SUFFIXES: tuple[str, ...] = SIDECAR_SUFFIXES + AUXILIARY_SUFFIXES
+_ANALYSABLE_SUFFIXES: tuple[str, ...] = (
+    VENDOR_RAW_SUFFIXES + CONVERTED_SUFFIXES + CONVERTIBLE_SUFFIXES
+)
+# Every container suffix is a single extension, so _container_suffix can look the last one up.
+_SUFFIX_OF_EXTENSION: dict[str, str] = {suffix[1:]: suffix for suffix in _ALL_CONTAINER_SUFFIXES}
 _WATERS_FUNCTION = re.compile(r"_func\d+\.dat")
 
 
@@ -324,6 +359,8 @@ def archived_container_of(path: str) -> str:
     """The container a per-sample archive unpacks to: x.d.zip gives x.d; "" when it packs none."""
     value = _slashes(path).lstrip("/")
     lower = value.casefold()
+    if not lower.endswith(PACKED_ARCHIVE_SUFFIXES):
+        return ""
     for archive in PACKED_ARCHIVE_SUFFIXES:
         if lower.endswith(archive):
             inner = value[: -len(archive)]
@@ -333,13 +370,35 @@ def archived_container_of(path: str) -> str:
     return ""
 
 
+def unpacked_name(path: str) -> str:
+    """The file a packed file unpacks to, when its name says what it packs; "" otherwise.
+
+    A container, as archived_container_of reads it, or a file that travels with one: x.d.zip gives
+    x.d, x.wiff.scan.zip gives x.wiff.scan and x.timeseries.data.gz gives x.timeseries.data. An
+    accession archive such as ST000001_Rawdata.zip names nothing and gives "".
+    """
+    value = _slashes(path).lstrip("/")
+    lower = value.casefold()
+    if not lower.endswith(PACKED_ARCHIVE_SUFFIXES):
+        return ""
+    for archive in PACKED_ARCHIVE_SUFFIXES:
+        if lower.endswith(archive):
+            inner = value[: -len(archive)]
+            name = inner.rsplit("/", 1)[-1].casefold()
+            known = next((suffix for suffix in _TRAVELLING_SUFFIXES if name.endswith(suffix)), "")
+            known = known or _container_suffix(name)
+            return inner if known and len(name) > len(known) else ""
+    return ""
+
+
 def container_format(member_names: list[str]) -> str:
     """The vendor format of a folder, read from its members' names relative to the folder.
 
     Waters writes _FUNCnnn.DAT, Agilent an AcqData directory, and Bruker analysis.tdf, .tsf or
     .baf. The format is read from names because the Catalog has nothing else before a download;
     the execution layer re-derives it from the folder on disk, and the two must agree. "" when no
-    name says, and the formats joined with "+" when names say more than one.
+    name says, and the formats joined with "+" when names say more than one. The folder's analysis
+    input then carries UNKNOWN_FORMAT, the token the split hint counts it under.
     """
     found: set[str] = set()
     for name in member_names:
@@ -368,15 +427,12 @@ def _container_stem(path: str) -> str:
 
 def _container_kind(path: str) -> str:
     value = _slashes(archived_container_of(path) or path).casefold()
-    for suffix in UNREADABLE_SUFFIXES:
-        if value.endswith(suffix):
-            return "unreadable"
-    for suffix in CONVERTED_SUFFIXES:
-        if value.endswith(suffix):
-            return "converted"
-    for suffix in VENDOR_RAW_SUFFIXES:
-        if value.endswith(suffix):
-            return "vendor"
+    if value.endswith(UNREADABLE_SUFFIXES):
+        return "unreadable"
+    if value.endswith(CONVERTED_SUFFIXES):
+        return "converted"
+    if value.endswith(VENDOR_RAW_SUFFIXES):
+        return "vendor"
     return ""
 
 
@@ -386,7 +442,10 @@ def normalize_file_roles(
     """Classify primary, alternate, sidecar, auxiliary and vendor-folder member files.
 
     `samples` resolves each folder member to the sample row that names its folder, and finds the
-    declared directories; without it a member keeps the sample its folder already carried.
+    declared directories; without it a member keeps the sample its folder already carried. A
+    packed file that is no folder member says what it `unpacks_to`, and is classified as that
+    file: x.wiff.scan.zip is a sidecar. `container` is the analysis input a file belongs to: the
+    folder a member lies in, or the container a packed input unpacks to.
     """
     return _project_analysis_inputs({"files": files, "samples": samples or []})["files"]
 
@@ -402,14 +461,29 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
     by Class selection and by the handoff, so the projection of a projection must be the projection.
     That is why an unmatched row that names a folder is kept rather than dropped, and why a folder
     with no row gets no invented row: either would make the second projection disagree with the first.
+    A parent-directory row is dropped, so the view keeps it in `excluded_samples` and it is read
+    back here, to be dropped again with the same warning.
     """
-    rows = [dict(item) for item in unit.get("samples", []) or []]
+    rows = [
+        dict(item)
+        for item in [*(unit.get("samples", []) or []), *(unit.get("excluded_samples", []) or [])]
+    ]
     files = [dict(item) for item in unit.get("files", []) or []]
-    known_paths = {_slashes(_file_path(item)).casefold() for item in files}
+    known_paths: set[str] = set()
+    for item in files:
+        path = _slashes(_file_path(item)).lstrip("/").casefold()
+        known_paths.update(filter(None, (path, unpacked_name(path))))
     for item in files:
         item["role"] = _file_role(item, known_paths)
 
-    groups = _group_members(files, _declared_directories(rows, files))
+    declared = _declared_directories(rows, files)
+    named = _named_paths(rows, declared)
+    parents = _parent_directories(files, declared, named)
+    excluded = [row for row in rows if _directory_row_key(row) in parents]
+    if excluded:
+        rows = [row for row in rows if _directory_row_key(row) not in parents]
+        declared = {key: path for key, path in declared.items() if key not in parents}
+    groups = _group_members(files, declared, named)
     _prefer_one_container_per_sample(
         files, [group["path"] for group in groups.values() if group["kind"] == "vendor_folder"]
     )
@@ -428,7 +502,12 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
             group = groups[key]
             entry = _analysis_input(group["path"], group["kind"], group["members"], group["format"])
             source, listed = group["path"], group["members"]
-        elif role == "raw":
+        else:
+            unpacked = unpacked_name(_file_path(item))
+            if unpacked:
+                item["unpacks_to"] = unpacked
+            if role != "raw":
+                continue
             source, listed = _file_path(item), [item]
             inner = archived_container_of(source)
             if inner:
@@ -437,8 +516,6 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
                 entry["archive"] = source
             else:
                 entry = _analysis_input(source, "file", listed)
-        else:
-            continue
         inputs.append(entry)
         members[id(entry)] = listed
         sources[id(entry)] = source
@@ -446,13 +523,100 @@ def _project_analysis_inputs(unit: dict[str, Any]) -> dict[str, Any]:
     samples, issues = _attribute_samples(rows, inputs, members, sources, files)
     _resolve_file_samples(files, inputs, members, keep_declared=not rows)
     issues.extend(_format_issues(inputs))
+    if excluded:
+        issues.append(
+            {
+                "code": "parent_directory_row",
+                "blocking": False,
+                "count": len(excluded),
+                "examples": [str(row.get("raw_file") or "") for row in excluded][:5],
+                "message": (
+                    "sample rows name a directory that holds other rows' inputs, so they name no "
+                    "sample of their own and were dropped"
+                ),
+            }
+        )
     return {
         "files": files,
         "inputs": inputs,
         "samples": samples,
+        "excluded": excluded,
         "issues": issues,
         "split_hint": _split_hint(issues),
     }
+
+
+def _directory_row_key(row: dict[str, Any]) -> str:
+    """The directory a sample row names with a trailing "/", matched as declared directories are."""
+    raw = _slashes(row.get("raw_file")).strip()
+    return _match_key(raw) if raw.endswith("/") else ""
+
+
+def _named_paths(
+    rows: list[dict[str, Any]], declared: dict[str, str]
+) -> tuple[set[str], set[str]]:
+    """The paths the sample rows name, and their basenames, leaving out the declared directories."""
+    exact: set[str] = set()
+    for row in rows:
+        key = _match_key(row.get("raw_file"))
+        if key and key not in declared:
+            exact.add(key)
+    return exact, {key.rsplit("/", 1)[-1] for key in exact}
+
+
+def _is_named(path: str, named: tuple[set[str], set[str]]) -> bool:
+    """Whether a sample row names this file or folder, by its path or by its basename."""
+    exact, names = named
+    if not exact:
+        return False
+    for value in filter(None, (path, unpacked_name(path))):
+        key = _match_key(value)
+        if key in exact or key.rsplit("/", 1)[-1] in names:
+            return True
+    return False
+
+
+def _is_analysable(path: str) -> bool:
+    """Whether MS-DIAL opens a file, or the campaign converts it (mzXML), packed or not."""
+    return _slashes(archived_container_of(path) or path).casefold().endswith(_ANALYSABLE_SUFFIXES)
+
+
+def _parent_directories(
+    files: list[dict[str, Any]], declared: dict[str, str], named: tuple[set[str], set[str]]
+) -> set[str]:
+    """The declared directories that hold another row's input, keyed case-insensitively.
+
+    A PARENT DIRECTORY IS NO SAMPLE. A row whose raw_file is raw/, beside rows naming raw/a.mzML
+    and raw/b.mzML, names the directory the samples sit in. Read as a sample directory it absorbed
+    every file below it, the other rows' own files included, and blocked the unit as a directory
+    MS-DIAL cannot open; before the unit view grouped folders, it matched no file and was dropped.
+    It is dropped again, with a warning. A directory holds another row's input when a file or
+    vendor folder below it is one a row names, or when a deeper declared directory takes its
+    files. A container no row names does not count: it is no row's input, and a sample directory
+    holding one stray file must not be dropped for it and leave its other files as inputs.
+    """
+    if not declared:
+        return set()
+    nested = any(len(_declared_ancestors(key + "/", declared)) > 1 for key in declared)
+    if not named[0] and not nested:
+        # No row names a file or folder, and no declared directory lies in another (MTBKS263's
+        # 1,236 NMR experiments): none of them can hold another row's input.
+        return set()
+    parents: set[str] = set()
+    for item in files:
+        if item["role"] not in _MEMBER_CANDIDATE_ROLES:
+            continue
+        path = _slashes(_file_path(item)).lstrip("/")
+        above = _declared_ancestors(path, declared)
+        if not above:
+            continue
+        folder = container_of(path)
+        if _is_named(folder or path, named):
+            parents.update(above)
+        elif not folder and not _is_analysable(path):
+            # The innermost declared directory takes this file; every one above it holds that one.
+            parents.update(above[:-1])
+    return parents
 
 
 def _declared_directories(rows: list[dict[str, Any]], files: list[dict[str, Any]]) -> dict[str, str]:
@@ -472,17 +636,24 @@ def _declared_directories(rows: list[dict[str, Any]], files: list[dict[str, Any]
 
 
 def _group_members(
-    files: list[dict[str, Any]], declared: dict[str, str]
+    files: list[dict[str, Any]], declared: dict[str, str], named: tuple[set[str], set[str]]
 ) -> dict[str, dict[str, Any]]:
-    """Mark every file inside a vendor folder or a declared directory as a member of it."""
+    """Mark every file inside a vendor folder or a declared directory as a member of it.
+
+    A declared directory takes only what nothing else claims: never a container MS-DIAL opens or an
+    mzXML the campaign converts, and never a file a sample row names, because each of those is an
+    input of its own. Of two nested declared directories the inner one, the more specific, takes it.
+    """
     groups: dict[str, dict[str, Any]] = {}
     for item in files:
         if item["role"] not in _MEMBER_CANDIDATE_ROLES:
             continue
         path = _slashes(_file_path(item)).lstrip("/")
         container, kind = container_of(path), "vendor_folder"
-        if not container:
-            container, kind = _declared_directory_of(path, declared), "declared_directory"
+        if not container and declared:
+            directory = _declared_directory_of(path, declared)
+            if directory and not _is_analysable(path) and not _is_named(path, named):
+                container, kind = directory, "declared_directory"
         if not container:
             if item["role"] in MEMBER_ROLES:
                 # Said to be a member of a container its path does not lie in: read it as a file.
@@ -501,27 +672,32 @@ def _group_members(
         item.pop("demoted_because", None)
     for group in groups.values():
         offset = len(group["path"]) + 1
-        group["format"] = (
-            container_format(
+        group["format"] = ""
+        if group["kind"] == "vendor_folder":
+            group["format"] = container_format(
                 [_slashes(_file_path(item)).lstrip("/")[offset:] for item in group["members"]]
-            )
-            if group["kind"] == "vendor_folder"
-            else ""
-        )
+            ) or UNKNOWN_FORMAT
     return groups
 
 
 def _declared_directory_of(path: str, declared: dict[str, str]) -> str:
+    """The innermost declared directory a file lies in, or ""."""
+    above = _declared_ancestors(path, declared)
+    return declared[above[-1]] if above else ""
+
+
+def _declared_ancestors(path: str, declared: dict[str, str]) -> list[str]:
+    """The keys of the declared directories a file lies in, outermost first."""
     if not declared:
-        return ""
-    segments = path.split("/")
+        return []
+    found: list[str] = []
     prefix = ""
-    for segment in segments[:-1]:
+    for segment in path.split("/")[:-1]:
         prefix = f"{prefix}/{segment}" if prefix else segment
-        hit = declared.get(prefix.casefold())
-        if hit:
-            return hit
-    return ""
+        key = prefix.casefold()
+        if key in declared:
+            found.append(key)
+    return found
 
 
 def _analysis_input(
@@ -537,7 +713,10 @@ def _analysis_input(
         "sample_id": "",
     }
     if kind in {"file", "archived_container"}:
+        # The input says what has to happen to it, as its file does: an input read on its own must
+        # not look like a format with no conversion planned.
         entry["requires_conversion"] = bool(members[0].get("requires_conversion"))
+        entry["conversion_target"] = str(members[0].get("conversion_target") or "")
     return entry
 
 
@@ -567,27 +746,46 @@ def _attribute_samples(
         if item["role"] != "raw" and item["role"] not in MEMBER_ROLES:
             related[_primary_stem(_file_path(item))].append(_file_path(item))
 
+    # EVERY EXACT PATH FIRST, THEN THE FALLBACKS. One pass in input order let an input's fallback
+    # take a row that a later input names exactly: FILES/raw/x.mzML sorts before raw/x.mzML and
+    # took the row naming the second, by the leading directory the two differ by. Every input first
+    # takes the unused rows naming it exactly; only the inputs left without one then try a name,
+    # and then the sample id their files carry.
     used: set[int] = set()
-    samples: list[dict[str, Any]] = []
-    shared: list[str] = []
-    unnamed: list[str] = []
-    declared: list[str] = []
-    for entry in inputs:
-        container = entry["kind"] in _CONTAINER_KINDS
+    keys_of: list[list[str]] = []
+    claims: dict[int, list[int]] = {}
+    for position, entry in enumerate(inputs):
         keys = [_match_key(entry["path"])]
         if entry.get("archive"):
             keys.append(_match_key(entry["archive"]))
+        keys_of.append(keys)
         claimed = [index for key in keys for index in exact.get(key, ()) if index not in used]
         claimed = list(dict.fromkeys(claimed))
-        if not container:
+        if entry["kind"] not in _CONTAINER_KINDS:
             # One file, one row: a second row naming the same file is not a second injection.
             claimed = claimed[:1]
-        if not claimed:
-            claimed = _claim_by_name(keys, rows, by_name, used)
+        if claimed:
+            used.update(claimed)
+            claims[position] = claimed
+    for position, entry in enumerate(inputs):
+        if position in claims:
+            continue
+        claimed = _claim_by_name(keys_of[position], rows, by_name, used)
         if not claimed:
             declared_id = _declared_sample_id(members[id(entry)])
             candidates = [index for index in by_id.get(declared_id.casefold(), ()) if index not in used]
             claimed = candidates[:1] if declared_id else []
+        if claimed:
+            used.update(claimed)
+            claims[position] = claimed
+
+    samples: list[dict[str, Any]] = []
+    shared: list[str] = []
+    unnamed: list[str] = []
+    declared: list[str] = []
+    for position, entry in enumerate(inputs):
+        container = entry["kind"] in _CONTAINER_KINDS
+        claimed = claims.get(position, [])
         source = sources[id(entry)]
         if entry["kind"] == "declared_directory":
             declared.append(entry["path"])
@@ -608,7 +806,6 @@ def _attribute_samples(
                 }
             )
             continue
-        used.update(claimed)
         if len(claimed) > 1:
             shared.append(entry["path"])
             entry["sample_ids"] = [str(rows[index].get("sample_id") or "") for index in claimed]
@@ -752,37 +949,84 @@ def _resolve_file_samples(
 
 
 def _format_issues(inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Warn when a unit's vendor folders are of more than one format, with the count of each."""
-    counts: Counter[str] = Counter(
-        entry["format"] or "unknown" for entry in inputs if entry["kind"] == "vendor_folder"
+    """Warn when a unit's vendor containers need more than one run, with the count of each kind.
+
+    Vendor folders of more than one format are one case. Vendor folders beside vendor files of
+    another suffix are the other: MTBKS222 lists nine Waters .raw folders beside twelve SCIEX .wiff
+    files in one unit, and the formats alone could not say so, because a file carries none.
+    """
+    issues: list[dict[str, Any]] = []
+    formats: Counter[str] = Counter(
+        entry["format"] for entry in inputs if entry["kind"] == "vendor_folder"
     )
-    if len(set(counts) - {"unknown"}) < 2:
-        return []
-    return [
-        {
-            "code": "mixed_container_formats",
-            "blocking": False,
-            "count": sum(counts.values()),
-            "formats": dict(sorted(counts.items())),
-            "message": (
-                "the unit's vendor folders are of more than one format ("
-                + ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
-                + "); run them as separate parts, one format each"
-            ),
-        }
-    ]
+    if len(set(formats) - {UNKNOWN_FORMAT}) >= 2:
+        issues.append(
+            {
+                "code": "mixed_container_formats",
+                "blocking": False,
+                "count": sum(formats.values()),
+                "formats": dict(sorted(formats.items())),
+                "message": (
+                    "the unit's vendor folders are of more than one format ("
+                    + ", ".join(f"{name} {count}" for name, count in sorted(formats.items()))
+                    + "); run them as separate parts, one format each"
+                ),
+            }
+        )
+    folder_suffixes = {entry["suffix"] for entry in inputs if entry["kind"] == "vendor_folder"}
+    file_suffixes = {
+        entry["suffix"]
+        for entry in inputs
+        if entry["kind"] != "vendor_folder" and entry["suffix"] in VENDOR_RAW_SUFFIXES
+    }
+    if folder_suffixes and file_suffixes - folder_suffixes:
+        suffixes: Counter[str] = Counter(
+            entry["suffix"] for entry in inputs if entry["suffix"] in VENDOR_RAW_SUFFIXES
+        )
+        issues.append(
+            {
+                "code": "mixed_container_suffixes",
+                "blocking": False,
+                "count": sum(suffixes.values()),
+                "suffixes": dict(sorted(suffixes.items())),
+                "message": (
+                    "the unit's vendor folders sit beside vendor files of another suffix ("
+                    + ", ".join(f"{name} {count}" for name, count in sorted(suffixes.items()))
+                    + "); run them as separate parts, one suffix each"
+                ),
+            }
+        )
+    return issues
 
 
 def _split_hint(issues: list[dict[str, Any]]) -> dict[str, Any] | None:
-    mixed = next((item for item in issues if item["code"] == "mixed_container_formats"), None)
-    if mixed is None:
+    """How to split the unit so that each MS-DIAL run holds one kind of container, or None.
+
+    `key` names the analysis_inputs field whose value is an input's group, and `groups` counts the
+    inputs of each value, with the tokens analysis_inputs documents. A unit with mixed suffixes is
+    split by suffix first; when its folders are of more than one format as well, the part holding
+    them still carries the mixed_container_formats warning and is split again by format.
+    """
+    by_suffix = next((item for item in issues if item["code"] == "mixed_container_suffixes"), None)
+    if by_suffix is not None:
+        return {
+            "key": "suffix",
+            "groups": dict(by_suffix["suffixes"]),
+            "reason": (
+                "One MS-DIAL run reads one vendor's containers: Waters .raw folders and SCIEX "
+                ".wiff files are two instruments. Each analysis_inputs entry carries its suffix."
+            ),
+        }
+    by_format = next((item for item in issues if item["code"] == "mixed_container_formats"), None)
+    if by_format is None:
         return None
     return {
         "key": "format",
-        "groups": dict(mixed["formats"]),
+        "groups": dict(by_format["formats"]),
         "reason": (
             "One MS-DIAL run holds one container format: Bruker BAF and TDF folders are two "
-            "ion-mobility regimes. Each analysis_inputs entry carries its format."
+            "ion-mobility regimes. Each analysis_inputs entry carries its format, and a folder "
+            f"whose member names do not say is {UNKNOWN_FORMAT!r} in both places."
         ),
     }
 
@@ -808,6 +1052,12 @@ def _prefer_one_container_per_sample(
     ZT Scan DIA, where the .wiff2 is the one to read -- and nothing in repository metadata
     establishes that an acquisition was ZT Scan DIA, so it is not guessed at here. Resolving it
     needs the .wiff2 header, which only the raw-header preflight can read.
+
+    ONE CONTAINER, LISTED TWICE. A vendor folder enumerated member by member beside its own
+    archive (raw/x.raw/... and raw/x.raw.zip), or a file beside its own archive (x.mzML and
+    x.mzML.gz), is one container at one path, and gave two inputs of that path. The two are of
+    equal preference by kind, so this is decided first: the one listed unpacked is analysed, and
+    the archive is the download alternative.
     """
     by_stem: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in folders or []:
@@ -820,6 +1070,16 @@ def _prefer_one_container_per_sample(
         if _container_kind(path):
             by_stem[_container_stem(path)].append(item)
     for _stem, group in by_stem.items():
+        unpacked = {
+            _slashes(_file_path(item)).casefold()
+            for item in group
+            if not archived_container_of(_file_path(item))
+        }
+        for item in group:
+            inner = archived_container_of(_file_path(item))
+            if inner and _slashes(inner).casefold() in unpacked:
+                item["role"] = "raw_alternate"
+                item["demoted_because"] = "the container it packs is listed unpacked beside it"
         kinds = {id(item): _container_kind(_file_path(item)) for item in group}
         # A format MS-DIAL cannot open is never the file to analyse. It is marked wherever it
         # appears, alone or not, so a unit holding only these says so rather than queueing a run
@@ -838,16 +1098,17 @@ def _prefer_one_container_per_sample(
                         "MS-DIAL has no reader for this format, and no conversion to one it reads "
                         "is planned"
                     )
-        if len(group) < 2:
+        competing = [item for item in group if item["role"] == "raw"]
+        if len(competing) < 2:
             continue
-        readable = {id(item) for item in group if kinds[id(item)] in {"vendor", "converted"}}
-        vendor = {id(item) for item in group if kinds[id(item)] == "vendor"}
+        readable = {id(item) for item in competing if kinds[id(item)] in {"vendor", "converted"}}
+        vendor = {id(item) for item in competing if kinds[id(item)] == "vendor"}
         preferred = vendor or readable
-        if not preferred or len(preferred) == len(group):
+        if not preferred or len(preferred) == len(competing):
             # Either nothing MS-DIAL can read, or the duplicates are equally preferred and this
             # rule has no opinion about which of them to open.
             continue
-        for item in group:
+        for item in competing:
             if id(item) not in preferred:
                 item["role"] = "raw_alternate"
                 item["demoted_because"] = (
@@ -868,14 +1129,18 @@ def normalize_analysis_unit(unit: dict[str, Any]) -> dict[str, Any]:
     normalized["analysis_file_count"] = len(projection["inputs"])
     normalized["analysis_input_issues"] = projection["issues"]
     normalized["split_hint"] = projection["split_hint"]
+    normalized["excluded_samples"] = projection["excluded"]
     return normalized
 
 
 def _file_role(item: dict[str, Any], known_paths: set[str]) -> str:
-    path = str(item.get("path") or item.get("name") or "").replace("\\", "/").casefold()
-    if path.endswith(".timeseries.data"):
+    # A packed file is read as the file it unpacks to, for every rule here: x.wiff.scan.zip is a
+    # sidecar, packed, and x.wiff.zip the alternate of an x.wiff2.zip beside it.
+    path = _slashes(_file_path(item)).lstrip("/").casefold()
+    path = unpacked_name(path) or path
+    if path.endswith(AUXILIARY_SUFFIXES):
         return "auxiliary"
-    if path.endswith(".wiff.scan"):
+    if path.endswith(SIDECAR_SUFFIXES):
         return "sidecar"
     role = str(item.get("role") or "raw")
     # WIFF2 WINS, ALWAYS. This used to demote the .wiff2 when a .wiff for the same sample was
@@ -891,8 +1156,10 @@ def _file_role(item: dict[str, Any], known_paths: set[str]) -> str:
 
 
 def _primary_stem(path: str) -> str:
+    """The name a SCIEX file shares with the files that travel with it, packed or not."""
     value = path.replace("\\", "/").casefold()
-    for suffix in (".timeseries.data", ".wiff.scan", ".wiff2", ".wiff"):
+    value = unpacked_name(value) or value
+    for suffix in (*AUXILIARY_SUFFIXES, *SIDECAR_SUFFIXES, ".wiff2", ".wiff"):
         if value.endswith(suffix):
             return value[: -len(suffix)]
     return value
@@ -911,15 +1178,14 @@ def _match_key(value: Any) -> str:
 
 
 def _container_suffix(path: str) -> str:
-    value = _slashes(path).casefold()
-    return next((suffix for suffix in _ALL_CONTAINER_SUFFIXES if value.endswith(suffix)), "")
+    _, dot, extension = _slashes(path).casefold().rpartition(".")
+    return _SUFFIX_OF_EXTENSION.get(extension, "") if dot else ""
 
 
 def _is_folder_container(segment: str) -> bool:
     value = segment.casefold()
-    return any(
-        value.endswith(suffix) and len(value) > len(suffix) for suffix in FOLDER_CONTAINER_SUFFIXES
-    )
+    # A segment that is only the suffix (".d") names no folder.
+    return value.endswith(FOLDER_CONTAINER_SUFFIXES) and value not in FOLDER_CONTAINER_SUFFIXES
 
 
 def _field_priority(field: str) -> float:

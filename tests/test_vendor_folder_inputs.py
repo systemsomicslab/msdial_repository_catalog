@@ -18,6 +18,7 @@ import json
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from msdial_repository_catalog.class_proposal import (
@@ -345,6 +346,21 @@ class BrukerTests(unittest.TestCase):
         self.assertEqual({"bruker_baf": 50, "bruker_tdf": 102}, view["split_hint"]["groups"])
         self.assertEqual("format", view["split_hint"]["key"])
 
+    def test_a_folder_whose_names_say_no_format_is_unknown_in_both_places(self) -> None:
+        """The split hint is keyed on each input's format, so the two must spell unknown alike."""
+        unit = self.unit(2, 2)
+        unit["files"] += [
+            {"path": path, "role": "raw", "size_bytes": 10, "sample_id": ""}
+            for path in ("raw/odd.d/odd.d", "raw/odd.d/SampleInfo.xml")
+        ]
+        unit["samples"].append({"sample_id": "odd", "raw_file": "raw/odd.d/", "attributes": {}})
+        view = normalize_analysis_unit(unit)
+
+        self.assertEqual({"bruker_baf": 2, "bruker_tdf": 2, "unknown": 1}, view["split_hint"]["groups"])
+        self.assertEqual(
+            view["split_hint"]["groups"], dict(Counter(item["format"] for item in view["analysis_inputs"]))
+        )
+
     def test_one_format_gives_no_hint(self) -> None:
         view = normalize_analysis_unit(self.unit(0, 4))
 
@@ -450,6 +466,87 @@ class OtherShapeTests(unittest.TestCase):
         self.assertEqual("raw_alternate", roles["FILES/a.mzML.zip"])
         self.assertEqual(1, view["analysis_file_count"])
 
+    def test_a_folder_listed_beside_its_own_archive(self) -> None:
+        """raw/x.raw/ member by member and raw/x.raw.zip: one container, so one input."""
+        view = normalize_analysis_unit(
+            unit_of([("x", "raw/x.raw/")], ["raw/x.raw/_FUNC001.DAT", "raw/x.raw/_HEADER.TXT", "raw/x.raw.zip"])
+        )
+        archive = next(item for item in view["files"] if item["path"] == "raw/x.raw.zip")
+
+        self.assertEqual(
+            [("raw/x.raw", "vendor_folder", "x")],
+            [(item["path"], item["kind"], item["sample_id"]) for item in view["analysis_inputs"]],
+        )
+        self.assertEqual("raw_alternate", archive["role"])
+        self.assertIn("listed unpacked beside it", archive["demoted_because"])
+        self.assertNotIn("container", archive, "an alternate is not a member of the folder")
+        self.assertEqual([], codes(view))
+
+    def test_a_file_listed_beside_its_own_archive(self) -> None:
+        view = normalize_analysis_unit(unit_of([("x", "raw/x.mzML")], ["raw/x.mzML", "raw/x.mzML.gz"]))
+        roles = {item["path"]: item["role"] for item in view["files"]}
+
+        self.assertEqual({"raw/x.mzML": "raw", "raw/x.mzML.gz": "raw_alternate"}, roles)
+        self.assertEqual(["raw/x.mzML"], [item["path"] for item in view["analysis_inputs"]])
+
+    def test_an_input_carries_its_conversion_target(self) -> None:
+        """MTBLS688 publishes only x.mzXML.lzma: packed mzXML, to be converted to mzML and run."""
+        view = normalize_analysis_unit(
+            unit_of([], ["FILES/a.mzXML", "FILES/b.mzXML.gz", "FILES/c.mzXML.lzma", "FILES/d.mzData"])
+        )
+        inputs = {item["path"]: item for item in view["analysis_inputs"]}
+
+        self.assertEqual(["FILES/a.mzXML", "FILES/b.mzXML", "FILES/c.mzXML", "FILES/d.mzData"], list(inputs))
+        self.assertEqual("archived_container", inputs["FILES/c.mzXML"]["kind"])
+        self.assertEqual(".mzxml", inputs["FILES/c.mzXML"]["suffix"])
+        for path in ("FILES/a.mzXML", "FILES/b.mzXML", "FILES/c.mzXML"):
+            self.assertTrue(inputs[path]["requires_conversion"], path)
+            self.assertEqual("mzML", inputs[path]["conversion_target"], path)
+        self.assertTrue(inputs["FILES/d.mzData"]["requires_conversion"])
+        self.assertEqual("", inputs["FILES/d.mzData"]["conversion_target"], "no conversion is planned")
+
+    def test_a_packed_sidecar_is_a_sidecar(self) -> None:
+        """s.wiff.scan.zip was an input of its own, flagged for conversion: Interactive excluded the unit."""
+        unit = unit_of([("s", "raw/s.wiff")], ["raw/s.wiff", "raw/s.wiff.scan.zip"])
+        unit["files"][0]["sample_id"] = "s"
+        view = normalize_analysis_unit(unit)
+        sidecar = next(item for item in view["files"] if item["path"] == "raw/s.wiff.scan.zip")
+
+        self.assertEqual(["raw/s.wiff"], [item["path"] for item in view["analysis_inputs"]])
+        self.assertEqual(1, view["sample_count"])
+        self.assertEqual("sidecar", sidecar["role"])
+        self.assertEqual("raw/s.wiff.scan", sidecar["unpacks_to"])
+        self.assertNotIn("requires_conversion", sidecar)
+        self.assertEqual("s", sidecar["sample_id"])
+        self.assertEqual("raw/s.wiff", sidecar["parent_file"])
+        self.assertEqual(["raw/s.wiff.scan.zip"], view["samples"][0]["related_files"])
+
+    def test_folders_beside_vendor_files_of_another_suffix_warn(self) -> None:
+        """MTBKS222: nine Waters folders and twelve .wiff files in one unit, two vendors' readers."""
+        rows = [(f"folder_{index}", f"raw/w{index}.raw/") for index in range(3)]
+        rows += [(f"wiff_{index}", f"raw/s{index}.wiff") for index in range(4)]
+        paths = [f"raw/w{index}.raw/{name}" for index in range(3) for name in ("_FUNC001.DAT", "_HEADER.TXT")]
+        paths += [f"raw/s{index}{suffix}" for index in range(4) for suffix in (".wiff", ".wiff.scan")]
+        view = normalize_analysis_unit(unit_of(rows, paths))
+
+        self.assertEqual([], codes(view, blocking=True))
+        self.assertEqual(["mixed_container_suffixes"], codes(view, blocking=False))
+        self.assertEqual({".raw": 3, ".wiff": 4}, view["analysis_input_issues"][0]["suffixes"])
+        self.assertEqual("suffix", view["split_hint"]["key"])
+        self.assertEqual({".raw": 3, ".wiff": 4}, view["split_hint"]["groups"])
+        self.assertEqual(
+            view["split_hint"]["groups"],
+            dict(Counter(item[view["split_hint"]["key"]] for item in view["analysis_inputs"])),
+        )
+
+    def test_folders_beside_files_of_their_own_suffix_or_converted_files_do_not_warn(self) -> None:
+        view = normalize_analysis_unit(
+            unit_of([("a", "raw/a.d/"), ("b", "raw/b.mzML")], ["raw/a.d/AcqData/MSScan.bin", "raw/b.mzML"])
+        )
+
+        self.assertEqual([], codes(view))
+        self.assertIsNone(view["split_hint"])
+
     def test_an_archive_two_rows_name_is_read_as_a_file_is(self) -> None:
         """A published archive is one file, and the Catalog has always given a file to its first row."""
         view = normalize_analysis_unit(
@@ -534,6 +631,107 @@ class AttributionTests(unittest.TestCase):
             unit_of([("a", "one/x.mzML"), ("b", "two/x.mzML")], ["FILES/three/x.mzML"])
         )
         self.assertNotIn(ambiguous["samples"][0]["sample_id"], {"a", "b"})
+
+    def test_every_exact_path_is_claimed_before_any_fallback(self) -> None:
+        """The input whose path nests the row's sorts first, and used to take the row by name."""
+        view = normalize_analysis_unit(unit_of([("exact", "raw/x.mzML")], ["FILES/raw/x.mzML", "raw/x.mzML"]))
+        by_path = {item["path"]: item["sample_id"] for item in view["analysis_inputs"]}
+
+        self.assertEqual("exact", by_path["raw/x.mzML"])
+        self.assertNotEqual("exact", by_path["FILES/raw/x.mzML"])
+        self.assertEqual(1, [item["sample_id"] for item in view["samples"]].count("exact"))
+        self.assertEqual(
+            ["FILES/raw/x.mzML", "raw/x.mzML"], [item["raw_file"] for item in view["samples"]], "input order"
+        )
+
+    def test_a_unique_basename_does_not_take_a_row_another_input_names_exactly(self) -> None:
+        """Plate 1 sorts first; the one row names the plate-2 file, and its basename is unique."""
+        rows = [("P2_S", "FILES/plate2/S_29_01.raw")]
+        view = normalize_analysis_unit(unit_of(rows, ["FILES/plate1/S_29_01.raw", "FILES/plate2/S_29_01.raw"]))
+        by_path = {item["path"]: item["sample_id"] for item in view["analysis_inputs"]}
+
+        self.assertEqual("P2_S", by_path["FILES/plate2/S_29_01.raw"])
+        self.assertNotEqual("P2_S", by_path["FILES/plate1/S_29_01.raw"])
+
+    def test_a_declared_sample_id_does_not_take_a_row_another_input_names_exactly(self) -> None:
+        """a.mzML carries b's sample id; the row, and its attributes, stay with the file it names."""
+        unit = unit_of([("b", "FILES/b.mzML")], ["FILES/a.mzML", "FILES/b.mzML"])
+        unit["samples"][0]["attributes"] = {"Factor Value[genotype]": "wild type"}
+        unit["files"][0]["sample_id"] = "b"
+        samples = {item["raw_file"]: item for item in analysis_samples(unit)}
+
+        self.assertEqual({"Factor Value[genotype]": "wild type"}, samples["FILES/b.mzML"]["attributes"])
+        self.assertEqual({}, samples["FILES/a.mzML"]["attributes"])
+
+
+class ParentDirectoryTests(unittest.TestCase):
+    """A row naming the directory the other rows' inputs sit in (raw/) names no sample of its own.
+
+    It used to become a declared directory that absorbed every file below it, the other rows' own
+    files included, and blocked the unit as a directory MS-DIAL cannot open. On main it was dropped.
+    """
+
+    def test_a_parent_directory_row_is_dropped_with_a_warning(self) -> None:
+        rows = [("study", "raw/"), ("a", "raw/a.mzML"), ("b", "raw/b.mzML")]
+        view = normalize_analysis_unit(unit_of(rows, ["raw/a.mzML", "raw/b.mzML"]))
+
+        self.assertEqual(
+            [("raw/a.mzML", "file", "a"), ("raw/b.mzML", "file", "b")],
+            [(item["path"], item["kind"], item["sample_id"]) for item in view["analysis_inputs"]],
+        )
+        self.assertEqual(["a", "b"], [item["sample_id"] for item in view["samples"]])
+        self.assertEqual({"raw"}, {item["role"] for item in view["files"]})
+        self.assertEqual([], codes(view, blocking=True))
+        self.assertEqual(["parent_directory_row"], codes(view, blocking=False))
+        self.assertEqual(["raw/"], view["analysis_input_issues"][0]["examples"])
+        again = normalize_analysis_unit(view)
+        self.assertEqual(view["samples"], again["samples"])
+        self.assertEqual(view["analysis_input_issues"], again["analysis_input_issues"])
+        self.assertEqual(view["samples"], analysis_samples(view))
+
+    def test_files_other_rows_name_are_never_absorbed(self) -> None:
+        """mzXML is no container MS-DIAL opens, and was absorbed as a member of the directory."""
+        rows = [("run", "raw/run/"), ("s1", "raw/run/s1.mzXML"), ("s2", "raw/run/s2.mzXML")]
+        view = normalize_analysis_unit(unit_of(rows, ["raw/run/notes.txt", "raw/run/s1.mzXML", "raw/run/s2.mzXML"]))
+        roles = {item["path"]: item["role"] for item in view["files"]}
+        inputs = {item["path"]: item for item in view["analysis_inputs"]}
+
+        self.assertEqual({"raw"}, set(roles.values()), "nothing is a member of the parent directory")
+        self.assertEqual("s1", inputs["raw/run/s1.mzXML"]["sample_id"])
+        self.assertEqual("s2", inputs["raw/run/s2.mzXML"]["sample_id"])
+        self.assertEqual("mzML", inputs["raw/run/s1.mzXML"]["conversion_target"])
+        self.assertNotIn("run", [item["sample_id"] for item in view["samples"]])
+        self.assertEqual([], codes(view, blocking=True))
+
+    def test_a_parent_directory_of_vendor_folders(self) -> None:
+        """The row had no member of its own, and blocked as a sample whose folder is not listed."""
+        rows = [("study", "raw/"), ("a", "raw/a.raw/"), ("b", "raw/b.raw/")]
+        paths = [f"raw/{name}.raw/{member}" for name in ("a", "b") for member in ("_FUNC001.DAT", "_HEADER.TXT")]
+        view = normalize_analysis_unit(unit_of(rows, paths))
+
+        self.assertEqual(["raw/a.raw", "raw/b.raw"], [item["path"] for item in view["analysis_inputs"]])
+        self.assertEqual(["a", "b"], [item["sample_id"] for item in view["samples"]])
+        self.assertEqual([], codes(view, blocking=True))
+        self.assertEqual(["parent_directory_row"], codes(view, blocking=False))
+
+    def test_a_parent_directory_of_sample_directories(self) -> None:
+        """The innermost directory a row names is the sample; the one above it is a parent."""
+        rows = [("study", "raw/"), ("0h", "raw/0h/"), ("24h", "raw/24h/")]
+        paths = [f"raw/{hour}/{name}" for hour in ("0h", "24h") for name in ("acqu", "fid")]
+        view = normalize_analysis_unit(unit_of(rows, paths))
+
+        self.assertEqual(["raw/0h", "raw/24h"], [item["path"] for item in view["analysis_inputs"]])
+        self.assertEqual(["0h", "24h"], [item["sample_id"] for item in view["analysis_inputs"]])
+        self.assertEqual(["declared_directory_not_msdial_input"], codes(view, blocking=True))
+        self.assertEqual(["parent_directory_row"], codes(view, blocking=False))
+        self.assertEqual(codes(view), codes(normalize_analysis_unit(view)))
+
+    def test_a_directory_row_holding_only_unnamed_files_still_blocks(self) -> None:
+        """No other row names anything below it, so it is not a parent: it names what it holds."""
+        view = normalize_analysis_unit(unit_of([("run", "raw/run/")], ["raw/run/acqu", "raw/run/fid"]))
+
+        self.assertEqual(["declared_directory_not_msdial_input"], codes(view, blocking=True))
+        self.assertEqual(["run"], [item["sample_id"] for item in view["samples"]])
 
 
 class LinearTimeTests(unittest.TestCase):

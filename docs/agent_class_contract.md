@@ -56,9 +56,15 @@ folder is one input, one sample row and one Class assignment; the files
 inside it stay in `files`, with role `vendor_folder_member` and their
 `container`, because they are what is downloaded and checksummed. A per-sample
 archive such as `x.d.zip` is one input whose `path` is the container it unpacks
-to. `sample_count`, `analytical_sample_count` and
-`download_scope.analysis_file_count` equal the number of `analysis_inputs`,
-while `download_scope.file_count` still counts every file. The inputs are
+to, and a packed file is read as the file it unpacks to (`unpacks_to`), so
+`x.wiff.scan.zip` is a sidecar and `x.mzXML.lzma` an mzXML to convert. A
+container listed both unpacked and as its own archive is analysed unpacked, and
+the archive becomes `raw_alternate`. `analytical_sample_count` and
+`download_scope.analysis_file_count` count the `analysis_inputs`;
+`sample_count` counts the sample rows, and equals that count when
+`analysis_inputs_declared` is true and no `analysis_input` issue blocks. A
+blocking issue can leave a row with no input of its own, or an input no row
+names. `download_scope.file_count` still counts every file. The inputs are
 written into the handoff file and into `analysis_input_manifest_path`, and
 omitted from the response. When the listing names no input, because the data
 sit inside accession archives or the unit publishes only converted files,
@@ -68,8 +74,13 @@ A folder named by two sample rows, a sample row whose folder is not listed, a
 listed folder that no row names, and a sample directory that is not an MS-DIAL
 container (Bruker NMR) each add an `analysis_input:<code>` blocking reason.
 Folders of more than one vendor format in one unit, such as Bruker BAF and TDF,
-only warn: the handoff carries a `split_hint` with the count of each format,
-and each input carries its `format`.
+and vendor folders beside vendor files of another suffix, such as Waters
+`.raw` folders beside SCIEX `.wiff` files, only warn: the handoff carries a
+`split_hint` whose `key` names the input field to split on (`suffix`, else
+`format`) and whose `groups` count each value. A folder whose member names do
+not say its format has `format` `unknown` in both places. A sample row naming
+the directory other rows' inputs sit in, such as `raw/`, names no sample: it is
+dropped with the warning `parent_directory_row`.
 
 When the selected fields are already reviewed, saving with an empty assignment
 array first returns a deterministic field-projection preview. Explicit
