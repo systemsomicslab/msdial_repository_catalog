@@ -191,6 +191,40 @@ def infer_ion_mode(*values: Any) -> str:
     return "Unknown"
 
 
+# ION MOBILITY IS A PROPERTY OF THE UNIT, READ FROM THE UNIT'S OWN EVIDENCE (decided 2026-10-03).
+#
+# MetaboBank MTBKS217 is a Waters Xevo G2 QTOF unit, and it was stored with ion mobility Enabled
+# because the study description it shares with its sibling accessions -- the MS-DIAL 4 lipidome
+# atlas abstract -- says the atlas "included ion mobility tandem mass spectrometry". Metabolomics
+# Workbench did the same with every word of a study's summary and HTML detail page. The campaign
+# excluded such a unit as LC-IM-MS on that sentence. A unit is ion mobility only on what its own
+# rows or assay fields say: an instrument that names a mobility device, or a parameter that says
+# mobility was on. A study-level mention leaves it Unknown and says so in a warning, and the raw
+# headers settle it: Interactive excludes mobility files, by header and by container, file by file.
+# ion_mobility.ion_mobility_evidence applies this rule. The adapters still store the crawl's reading
+# (infer_ion_mobility below, study text included): ion_mobility is part of the technical signature,
+# so a corrected stored value would re-key every changed unit at the next routine crawl and delete
+# its Class proposals and run records with it (ion_mobility.py says why).
+#
+# WHICH INSTRUMENT NAMES COUNT. timsTOF (and "trapped ion mobility"), Synapt, Vion, Agilent 6560 and
+# Cyclic IMS: the names the campaign plan has excluded on since 2026-09-30, with HDMS and an
+# instrument named "ion mobility" beside them. They are matched against instrument fields only,
+# never against free text, where "6560" may be a sample number and "cyclic" a peptide.
+ION_MOBILITY_INSTRUMENT = re.compile(
+    r"\btims|synapt|\bvion\b|\b6560\b|\bcyclic\b|\bhdms\b|\bion[\s-]+mobility\b", re.IGNORECASE
+)
+# A study-level mention. Stricter than the unit-level words: "CCS" is also a company (MetaboBank
+# MTBKS22's LED panels are from CCS Inc.), and a warning should not be raised on a lighting supplier.
+_STUDY_ION_MOBILITY = re.compile(
+    r"\b(ion[\s-]+mobility|pasef|tims|timstof|drift[\s-]+time|collision[\s-]+cross[\s-]+sections?)\b"
+)
+ION_MOBILITY_STUDY_TEXT_CODE = "ion_mobility_mentioned_in_study_text"
+ION_MOBILITY_STUDY_TEXT_WARNING = (
+    f"{ION_MOBILITY_STUDY_TEXT_CODE}: the study's text mentions ion mobility, but none of this "
+    "unit's own rows or fields does, so ion mobility is Unknown here; the raw headers settle it."
+)
+
+
 def infer_ion_mobility(*values: Any) -> str:
     text = normalized_text(*values)
     if re.search(r"\b(ion mobility|pasef|tims|drift time|ccs)\b", text):
@@ -198,6 +232,59 @@ def infer_ion_mobility(*values: Any) -> str:
             return "Disabled"
         return "Enabled"
     return "Unknown"
+
+
+_DECLARED_ON = frozenset({"yes", "true", "on", "enabled", "1"})
+_DECLARED_OFF = frozenset({"no", "false", "off", "disabled", "0", "none"})
+_ION_MOBILITY_TECHNIQUE = re.compile(
+    r"\b(tims|twims|dtims|t-?wave|travell?ing[\s-]+wave|drift[\s-]+tube|pasef|hdmse?)\b"
+    r"|\btims-?on\b|\bion[\s-]+mobility\b",
+    re.IGNORECASE,
+)
+# A STATEMENT THAT MOBILITY WAS NOT USED names the technique too: "No ion mobility", "without ion
+# mobility", "TIMS off", "Ion mobility was not used", "Ion mobility: disabled", Bruker's "timsOFF".
+# So it is read before the technique is: a negation word next to a mobility term -- before it or
+# after it, with at most two words between, joined by spaces, colons, brackets or hyphens. A comma,
+# semicolon or full stop ends the statement, so "Ion mobility, no lock mass" stays on. A negation
+# misread here leaves a unit to Interactive's per-file header check, which excludes mobility files
+# anyway; a negation missed would exclude the unit at plan time on an explicit OFF.
+_NEGATION = r"(?:no|not|without|w/o|none|off|disabled?|false|unused|never|\w+n['\u2019]t)"
+_NEGATION_JOIN = r"[\s:=()\[\]-]+"
+_NEGATED_TERM = (
+    r"(?:tims|twims|dtims|t-?wave|travell?ing[\s-]+wave|drift[\s-]+tube|pasef|hdmse?|ims"
+    r"|(?:ion[\s-]+)?mobility)"
+)
+_ION_MOBILITY_NEGATED = re.compile(
+    rf"(?<![\w/]){_NEGATION}(?:{_NEGATION_JOIN}[\w/]+){{0,2}}?{_NEGATION_JOIN}{_NEGATED_TERM}\b"
+    rf"|\b{_NEGATED_TERM}(?:{_NEGATION_JOIN}[\w/]+){{0,2}}?{_NEGATION_JOIN}{_NEGATION}(?![\w/])"
+    r"|\btims-?off\b",
+    re.IGNORECASE,
+)
+
+
+def ion_mobility_negated(value: Any) -> bool:
+    """Whether a unit's own value says ion mobility was not used, though it names the technique."""
+    return bool(_ION_MOBILITY_NEGATED.search(metadata_scalar(value)))
+
+
+def declared_ion_mobility(value: Any) -> str:
+    """Enabled or Disabled from the value of a field about ion mobility; "" when it says neither.
+
+    "No", "Off", "None" or a negated technique ("No ion mobility", "TIMS off", "Ion mobility not
+    used") is Disabled, read first; "Yes", "On" or a mobility technique (TIMS, TWIMS, drift tube) is
+    Enabled. MB-POST's analyticalCondition carries such a field, and an SDRF may.
+    """
+    text = metadata_scalar(value).strip()
+    if text.casefold() in _DECLARED_OFF or ion_mobility_negated(text):
+        return "Disabled"
+    if text.casefold() in _DECLARED_ON or _ION_MOBILITY_TECHNIQUE.search(text):
+        return "Enabled"
+    return ""
+
+
+def study_mentions_ion_mobility(*values: Any) -> bool:
+    """Whether study-level text mentions ion mobility: a reason to warn, never to set Enabled."""
+    return bool(_STUDY_ION_MOBILITY.search(normalized_text(*values)))
 
 
 def infer_omics(*values: Any) -> str:

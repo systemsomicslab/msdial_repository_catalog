@@ -17,6 +17,7 @@ from .class_proposal import (
     validate_class_proposal,
 )
 from .class_selection import abstention_record, automatic_class_proposal, select_class_fields
+from .ion_mobility import ion_mobility_evidence
 
 from .models import ClassAssignment, ClassProposal, stable_id
 from .ratification import ACCEPTED_STATUS, RatificationError, normalize_ratification
@@ -526,6 +527,17 @@ def msdial_catalog_reanalysis_handoff(
     )
     urls = {str(item.get("download_url") or "") for item in files if item.get("download_url")}
     bundle_level = unit["repository"] == "mb_post" or len(urls) < len(files)
+    # The unit-level reading, not the stored column: MTBKS217 is stored Enabled on its study
+    # abstract and is Unknown here; MTBKS219/220 are Mixed (ion_mobility.py says why).
+    mobility = unit.get("ion_mobility_evidence") or ion_mobility_evidence(unit)
+    technical_settings = {
+        key: unit.get(key)
+        for key in (
+            "separation", "chromatography", "ion_mode", "acquisition_mode",
+            "ion_mobility", "instrument", "target_omics", "untargeted",
+        )
+    }
+    technical_settings["ion_mobility"] = mobility["technical_setting"]
     analysis_rows = list(unit["samples"])
     samples, unit_attributes = _compact_sample_metadata(analysis_rows)
     sample_path = database_path.parent / "handoffs" / f"{unit_id}-samples.json"
@@ -551,13 +563,9 @@ def msdial_catalog_reanalysis_handoff(
         "description": unit.get("description", ""),
         "publications": unit.get("publications", []),
         "publication_status": _publication_status(unit),
-        "technical_settings": {
-            key: unit.get(key)
-            for key in (
-                "separation", "chromatography", "ion_mode", "acquisition_mode",
-                "ion_mobility", "instrument", "target_omics", "untargeted",
-            )
-        },
+        "technical_settings": technical_settings,
+        # Additive on v1: the state, its source, and the instruments and container formats behind it.
+        "ion_mobility_evidence": mobility,
         "repository_url": unit.get("public_url", ""),
         "files": files,
         "file_manifest_path": str(file_path.resolve()),
@@ -605,7 +613,8 @@ def msdial_catalog_reanalysis_handoff(
             f"analysis_input:{item['code']}: {item['message']}"
             for item in input_issues
             if not item.get("blocking")
-        ],
+        ]
+        + list(mobility["warnings"]),
         "unit_attributes": unit_attributes,
         "sample_table_path": str(sample_path.resolve()),
         "sample_metadata": samples,

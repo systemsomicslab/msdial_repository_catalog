@@ -758,8 +758,17 @@ class Catalog:
             ]
         )
         from .class_proposal import normalize_analysis_unit
+        from .ion_mobility import ion_mobility_evidence
 
-        return normalize_analysis_unit(result)
+        view = normalize_analysis_unit(result)
+        # ion_mobility above is the stored column, the crawl's reading; this is the unit-level one
+        # the handoff and the campaign read (ion_mobility.py says why the column is left as it is).
+        view["ion_mobility_evidence"] = ion_mobility_evidence(view)
+        return view
+
+    def ion_mobility_evidence(self, unit_id: str) -> dict[str, Any]:
+        """A unit's ion-mobility state from its own evidence, for a caller that reads only that."""
+        return dict(self.get_unit(unit_id)["ion_mobility_evidence"])
 
     def download_scope(self, urls: list[str]) -> dict[str, Any]:
         """The download a unit's URLs amount to: per-URL objects, and the totals a person approves.
