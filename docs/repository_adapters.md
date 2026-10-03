@@ -83,6 +83,14 @@ Interactive's per-file header check and split exclude the mobility part.
 handoff's `technical_settings.ion_mobility` is its value (`Enabled`, `Mixed`,
 `Disabled`, `Unknown`).
 
+The adapters keep storing the crawl's reading for the same reason: a crawl
+re-ingests a study whose payload hash moved, so adapters that stored the
+corrected value would re-key 350 units of the 2026-10-03 catalog, the pilot's
+MTBKS217 negative among them, at the first routine update after a campaign
+releases its lock. Storing the corrected value waits until a re-crawl keeps unit
+identity, by carrying proposals and run records over to the re-keyed unit or by
+keeping `ion_mobility` out of the `unit_id` and the source subrecord id.
+
 ## Review policy
 
 The adapters never convert ambiguity into a reviewed fact. Typical review

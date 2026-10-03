@@ -201,6 +201,10 @@ def infer_ion_mode(*values: Any) -> str:
 # rows or assay fields say: an instrument that names a mobility device, or a parameter that says
 # mobility was on. A study-level mention leaves it Unknown and says so in a warning, and the raw
 # headers settle it: Interactive excludes mobility files, by header and by container, file by file.
+# ion_mobility.ion_mobility_evidence applies this rule. The adapters still store the crawl's reading
+# (infer_ion_mobility below, study text included): ion_mobility is part of the technical signature,
+# so a corrected stored value would re-key every changed unit at the next routine crawl and delete
+# its Class proposals and run records with it (ion_mobility.py says why).
 #
 # WHICH INSTRUMENT NAMES COUNT. timsTOF (and "trapped ion mobility"), Synapt, Vion, Agilent 6560 and
 # Cyclic IMS: the names the campaign plan has excluded on since 2026-09-30, with HDMS and an

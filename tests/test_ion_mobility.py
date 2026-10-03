@@ -8,8 +8,9 @@ name the instrument, but they list Bruker BAF folders (timsOFF) beside TDF folde
 the TDF part is ion mobility; Interactive's per-file check and split exclude it.
 
 These tests hold the projection the handoff and the campaign read (ion_mobility_evidence) to the
-four states. The fixtures are synthetic and shaped on the units named in each test; nothing here
-reads a repository or the catalog database.
+four states, and the adapters to the stored reading, so that a re-crawl keeps every unit_id. The
+fixtures are synthetic and shaped on the units named in each test; nothing here reads a repository
+or the catalog database.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ from msdial_repository_catalog.adapters.common import (
     declared_ion_mobility,
     study_mentions_ion_mobility,
 )
+from msdial_repository_catalog.adapters.metabobank import MetaboBankAdapter
+from msdial_repository_catalog.class_proposal import field_based_proposal
+from msdial_repository_catalog.crawler import CatalogCrawler
 from msdial_repository_catalog.ion_mobility import ion_mobility_evidence
 from msdial_repository_catalog.mcp_server import msdial_catalog_reanalysis_handoff
 from msdial_repository_catalog.normalize import project_to_study
@@ -380,6 +384,84 @@ class CatalogTests(unittest.TestCase):
                 any(reason.startswith("ion_mobility") for reason in handoff["blocking_reasons"]),
                 "Interactive excludes the TDF part; the Catalog does not block the unit",
             )
+
+
+class MetaboBankClient:
+    """MTBKS217 as MetaboBank serves it: Xevo rows under the lipidome-atlas abstract."""
+
+    def __init__(self) -> None:
+        columns = {
+            "Parameter Value[Chromatography instrument]": "Waters Acquity UPLC system",
+            "Parameter Value[Instrument]": XEVO,
+            "Parameter Value[Scan polarity]": "Negative",
+            "Parameter Value[Data acquisition method]": "DIA",
+            "Factor Value[Tissue]": "leaf",
+        }
+        rows = []
+        for index in (1, 2, 3, 4):
+            values = {**columns, "Factor Value[Tissue]": "leaf" if index <= 2 else "root"}
+            rows.append("\t".join([f"S{index}", f"S{index}", *values.values(), f"raw/S{index}.raw/"]))
+        self.values = {
+            "entries/metabobank/MTBKS217": {
+                "identifier": "MTBKS217",
+                "title": "A lipidome atlas in MS-DIAL 4 (Plants)",
+                "description": ATLAS_ABSTRACT,
+                "properties": {"Study Description": [ATLAS_ABSTRACT]},
+                "distribution": [{"encodingFormat": "DATA", "contentUrl": "https://example/MTBKS217/"}],
+            },
+            ".filelist.txt": "Type\tName\tSize\tMD5\n"
+            + "".join(f"file\traw/S{index}.raw/_FUNC001.DAT\t10\t{index:032x}\n" for index in (1, 2, 3, 4)),
+            ".sdrf.txt": "\t".join(["Source Name", "Sample Name", *columns, "Raw Data File"])
+            + "\n"
+            + "\n".join(rows)
+            + "\n",
+        }
+
+    def _value(self, url: str) -> Any:
+        return next(value for token, value in self.values.items() if token in url)
+
+    def get_text(self, url: str) -> str:
+        value = self._value(url)
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def get_json(self, url: str) -> Any:
+        value = self._value(url)
+        return json.loads(value) if isinstance(value, str) else value
+
+
+class RecrawlIdentityTests(unittest.TestCase):
+    """An ordinary re-crawl keeps every unit_id, so no Class proposal or run record is lost.
+
+    ion_mobility is part of the technical signature, so of the unit_id and of a MetaboBank source
+    subrecord id, and a crawl re-ingests a study whose payload hash moved. Adapters that stored the
+    corrected value would bring 350 units of the 2026-10-03 catalog back under new unit_ids, the
+    pilot's MTBKS217 negative (4478d8b0f8a087bd766d) among them, at the first routine update after
+    the pilot releases its campaign lock, and the upsert cascade would delete each old unit with its
+    Class proposal and run records. So the adapters keep storing the crawl's reading and only the
+    projection corrects it, until a re-crawl keeps unit identity, which is the user's decision.
+    """
+
+    def test_a_recrawl_keeps_mtbks217_its_unit_id_and_its_class_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, Catalog(Path(temporary) / "catalog.sqlite") as catalog:
+            crawler = CatalogCrawler(catalog)
+            crawler.sync(MetaboBankAdapter(MetaboBankClient()), accessions=["MTBKS217"])
+            (unit_id,) = [row["unit_id"] for row in catalog.connection.execute("SELECT unit_id FROM analysis_unit")]
+            unit = catalog.get_unit(unit_id)
+            tissue = [name for name in unit["samples"][0]["attributes"] if "Tissue" in name]
+            proposal = field_based_proposal(unit, "pilot", tissue)
+            catalog.save_class_proposal(proposal)
+
+            summary = crawler.sync(MetaboBankAdapter(MetaboBankClient()), accessions=["MTBKS217"])
+            after = [row["unit_id"] for row in catalog.connection.execute("SELECT unit_id FROM analysis_unit")]
+
+            self.assertEqual("Enabled", unit["ion_mobility"], "the crawl's reading, as the live catalog stores it")
+            self.assertFalse(any(item.startswith(ION_MOBILITY_STUDY_TEXT_CODE) for item in unit["warnings"]))
+            self.assertEqual(("unknown", "study_text"), (
+                unit["ion_mobility_evidence"]["state"], unit["ion_mobility_evidence"]["source"]
+            ))
+            self.assertEqual((0, 1), (summary.hydrated, summary.unchanged))
+            self.assertEqual([unit_id], after)
+            self.assertEqual(unit_id, catalog.get_class_proposal(proposal.proposal_id)["unit_id"])
 
 
 if __name__ == "__main__":

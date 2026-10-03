@@ -45,6 +45,14 @@ unit_id. A MetaboBank re-parse would also move more than this field: the payload
 with sorted keys, so the SDRF column order that picks a unit's instrument field is gone, and MTBKS222
 would come back with other instruments. So the stored column keeps the crawl's reading, and the
 handoff's technical_settings and the campaign runner read this projection instead.
+
+The adapters keep the crawl's reading for the same reason. A crawl re-ingests a study whose payload
+hash moved, so adapters that stored the corrected value would re-key the same units at the first
+routine update -- the CLI, the GUI or msdial_catalog_update_start, once a campaign has released its
+lock -- and the cascade would delete their proposals and run records. Storing the corrected value
+waits until a re-crawl keeps unit identity, by carrying proposals and run records over to the
+re-keyed unit or by keeping ion_mobility out of the unit_id and the source subrecord id; that
+changes unit identity, so it is the user's decision.
 """
 
 from __future__ import annotations
