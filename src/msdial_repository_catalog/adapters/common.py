@@ -191,6 +191,36 @@ def infer_ion_mode(*values: Any) -> str:
     return "Unknown"
 
 
+# ION MOBILITY IS A PROPERTY OF THE UNIT, READ FROM THE UNIT'S OWN EVIDENCE (decided 2026-10-03).
+#
+# MetaboBank MTBKS217 is a Waters Xevo G2 QTOF unit, and it was stored with ion mobility Enabled
+# because the study description it shares with its sibling accessions -- the MS-DIAL 4 lipidome
+# atlas abstract -- says the atlas "included ion mobility tandem mass spectrometry". Metabolomics
+# Workbench did the same with every word of a study's summary and HTML detail page. The campaign
+# excluded such a unit as LC-IM-MS on that sentence. A unit is ion mobility only on what its own
+# rows or assay fields say: an instrument that names a mobility device, or a parameter that says
+# mobility was on. A study-level mention leaves it Unknown and says so in a warning, and the raw
+# headers settle it: Interactive excludes mobility files, by header and by container, file by file.
+#
+# WHICH INSTRUMENT NAMES COUNT. timsTOF (and "trapped ion mobility"), Synapt, Vion, Agilent 6560 and
+# Cyclic IMS: the names the campaign plan has excluded on since 2026-09-30, with HDMS and an
+# instrument named "ion mobility" beside them. They are matched against instrument fields only,
+# never against free text, where "6560" may be a sample number and "cyclic" a peptide.
+ION_MOBILITY_INSTRUMENT = re.compile(
+    r"\btims|synapt|\bvion\b|\b6560\b|\bcyclic\b|\bhdms\b|\bion[\s-]+mobility\b", re.IGNORECASE
+)
+# A study-level mention. Stricter than the unit-level words: "CCS" is also a company (MetaboBank
+# MTBKS22's LED panels are from CCS Inc.), and a warning should not be raised on a lighting supplier.
+_STUDY_ION_MOBILITY = re.compile(
+    r"\b(ion[\s-]+mobility|pasef|tims|timstof|drift[\s-]+time|collision[\s-]+cross[\s-]+sections?)\b"
+)
+ION_MOBILITY_STUDY_TEXT_CODE = "ion_mobility_mentioned_in_study_text"
+ION_MOBILITY_STUDY_TEXT_WARNING = (
+    f"{ION_MOBILITY_STUDY_TEXT_CODE}: the study's text mentions ion mobility, but none of this "
+    "unit's own rows or fields does, so ion mobility is Unknown here; the raw headers settle it."
+)
+
+
 def infer_ion_mobility(*values: Any) -> str:
     text = normalized_text(*values)
     if re.search(r"\b(ion mobility|pasef|tims|drift time|ccs)\b", text):
@@ -198,6 +228,34 @@ def infer_ion_mobility(*values: Any) -> str:
             return "Disabled"
         return "Enabled"
     return "Unknown"
+
+
+_DECLARED_ON = frozenset({"yes", "true", "on", "enabled", "1"})
+_DECLARED_OFF = frozenset({"no", "false", "off", "disabled", "0", "none"})
+_ION_MOBILITY_TECHNIQUE = re.compile(
+    r"\b(tims|twims|dtims|t-?wave|travell?ing[\s-]+wave|drift[\s-]+tube|pasef|hdmse?)\b"
+    r"|\bion[\s-]+mobility\b",
+    re.IGNORECASE,
+)
+
+
+def declared_ion_mobility(value: Any) -> str:
+    """Enabled or Disabled from the value of a field about ion mobility; "" when it says neither.
+
+    "Yes", "On" or a mobility technique (TIMS, TWIMS, drift tube) is Enabled; "No", "Off" or "None"
+    is Disabled. MB-POST's analyticalCondition carries such a field, and an SDRF may.
+    """
+    text = metadata_scalar(value).strip()
+    if text.casefold() in _DECLARED_OFF:
+        return "Disabled"
+    if text.casefold() in _DECLARED_ON or _ION_MOBILITY_TECHNIQUE.search(text):
+        return "Enabled"
+    return ""
+
+
+def study_mentions_ion_mobility(*values: Any) -> bool:
+    """Whether study-level text mentions ion mobility: a reason to warn, never to set Enabled."""
+    return bool(_STUDY_ION_MOBILITY.search(normalized_text(*values)))
 
 
 def infer_omics(*values: Any) -> str:
