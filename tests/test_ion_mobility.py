@@ -22,6 +22,7 @@ from typing import Any
 
 from msdial_repository_catalog.adapters.common import (
     ION_MOBILITY_STUDY_TEXT_CODE,
+    declared_ion_mobility,
     study_mentions_ion_mobility,
 )
 from msdial_repository_catalog.ion_mobility import ion_mobility_evidence
@@ -239,6 +240,76 @@ class EvidenceTests(unittest.TestCase):
         view = normalize_analysis_unit(raw)
 
         self.assertEqual(ion_mobility_evidence(raw), ion_mobility_evidence(view))
+
+
+class NegationTests(unittest.TestCase):
+    """A field that says ion mobility was NOT used is off, though it names the technique.
+
+    Any value naming a technique was read as on, so "No ion mobility" or "TIMS off" in a field about
+    mobility, or "DDA without ion mobility" in an acquisition field, made the unit enabled from
+    assay_parameter, and the campaign plan excluded it on an explicit OFF.
+    """
+
+    OFF = (
+        "No",
+        "None",
+        "No ion mobility",
+        "No ion mobility separation",
+        "Ion mobility not used",
+        "Ion mobility was not used",
+        "Ion mobility wasn't used",
+        "without ion mobility",
+        "Ion mobility: disabled",
+        "IMS: none",
+        "TIMS off",
+        "timsOFF",
+    )
+    ON = (
+        "Yes",
+        "TIMS",
+        "TIMS on",
+        "timsON",
+        "trapped ion mobility spectrometry (TIMS)",
+        "Drift tube ion mobility",
+        "TWIMS",
+        "PASEF",
+        "Ion mobility, nominal resolution",
+    )
+
+    def test_a_mobility_field_that_says_off_is_disabled(self) -> None:
+        for value in self.OFF:
+            with self.subTest(value=value):
+                self.assertEqual("Disabled", declared_ion_mobility(value))
+
+    def test_a_mobility_field_that_names_a_technique_is_still_enabled(self) -> None:
+        for value in self.ON:
+            with self.subTest(value=value):
+                self.assertEqual("Enabled", declared_ion_mobility(value))
+
+    def test_rows_saying_no_ion_mobility_are_none(self) -> None:
+        rows = [
+            (f"s{index}", f"s{index}.mzML", {"Parameter Value[Ion mobility]": "No ion mobility separation"})
+            for index in range(2)
+        ]
+        evidence = ion_mobility_evidence(unit_view(rows, ["s0.mzML", "s1.mzML"]))
+
+        self.assertEqual(("none", "assay_parameter"), (evidence["state"], evidence["source"]))
+        self.assertEqual(2, evidence["rows_saying_ion_mobility_off"])
+        self.assertEqual(0, evidence["rows_with_ion_mobility_evidence"])
+
+    def test_an_acquisition_without_ion_mobility_is_off(self) -> None:
+        rows = [("s1", "s1.mzML", {"Parameter Value[Data acquisition method]": "DDA without ion mobility"})]
+        evidence = ion_mobility_evidence(unit_view(rows, ["s1.mzML"]))
+
+        self.assertEqual(("none", "assay_parameter"), (evidence["state"], evidence["source"]))
+
+    def test_an_instrument_field_saying_tims_off_names_no_mobility_instrument(self) -> None:
+        """The instrument is a timsTOF; the field says TIMS was off, so the BAF folder decides."""
+        rows = [("s1", "raw/s1.d/", {"Parameter Value[Instrument]": "timsTOF Pro, TIMS off"})]
+        evidence = ion_mobility_evidence(unit_view(rows, bruker_folder("raw/s1.d", "analysis.baf")))
+
+        self.assertEqual(("none", "container_format"), (evidence["state"], evidence["source"]))
+        self.assertEqual([], evidence["ion_mobility_instruments"])
 
 
 class CatalogTests(unittest.TestCase):

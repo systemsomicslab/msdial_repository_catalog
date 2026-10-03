@@ -234,19 +234,44 @@ _DECLARED_ON = frozenset({"yes", "true", "on", "enabled", "1"})
 _DECLARED_OFF = frozenset({"no", "false", "off", "disabled", "0", "none"})
 _ION_MOBILITY_TECHNIQUE = re.compile(
     r"\b(tims|twims|dtims|t-?wave|travell?ing[\s-]+wave|drift[\s-]+tube|pasef|hdmse?)\b"
-    r"|\bion[\s-]+mobility\b",
+    r"|\btims-?on\b|\bion[\s-]+mobility\b",
     re.IGNORECASE,
 )
+# A STATEMENT THAT MOBILITY WAS NOT USED names the technique too: "No ion mobility", "without ion
+# mobility", "TIMS off", "Ion mobility was not used", "Ion mobility: disabled", Bruker's "timsOFF".
+# So it is read before the technique is: a negation word next to a mobility term -- before it or
+# after it, with at most two words between, joined by spaces, colons, brackets or hyphens. A comma,
+# semicolon or full stop ends the statement, so "Ion mobility, no lock mass" stays on. A negation
+# misread here leaves a unit to Interactive's per-file header check, which excludes mobility files
+# anyway; a negation missed would exclude the unit at plan time on an explicit OFF.
+_NEGATION = r"(?:no|not|without|w/o|none|off|disabled?|false|unused|never|\w+n['\u2019]t)"
+_NEGATION_JOIN = r"[\s:=()\[\]-]+"
+_NEGATED_TERM = (
+    r"(?:tims|twims|dtims|t-?wave|travell?ing[\s-]+wave|drift[\s-]+tube|pasef|hdmse?|ims"
+    r"|(?:ion[\s-]+)?mobility)"
+)
+_ION_MOBILITY_NEGATED = re.compile(
+    rf"(?<![\w/]){_NEGATION}(?:{_NEGATION_JOIN}[\w/]+){{0,2}}?{_NEGATION_JOIN}{_NEGATED_TERM}\b"
+    rf"|\b{_NEGATED_TERM}(?:{_NEGATION_JOIN}[\w/]+){{0,2}}?{_NEGATION_JOIN}{_NEGATION}(?![\w/])"
+    r"|\btims-?off\b",
+    re.IGNORECASE,
+)
+
+
+def ion_mobility_negated(value: Any) -> bool:
+    """Whether a unit's own value says ion mobility was not used, though it names the technique."""
+    return bool(_ION_MOBILITY_NEGATED.search(metadata_scalar(value)))
 
 
 def declared_ion_mobility(value: Any) -> str:
     """Enabled or Disabled from the value of a field about ion mobility; "" when it says neither.
 
-    "Yes", "On" or a mobility technique (TIMS, TWIMS, drift tube) is Enabled; "No", "Off" or "None"
-    is Disabled. MB-POST's analyticalCondition carries such a field, and an SDRF may.
+    "No", "Off", "None" or a negated technique ("No ion mobility", "TIMS off", "Ion mobility not
+    used") is Disabled, read first; "Yes", "On" or a mobility technique (TIMS, TWIMS, drift tube) is
+    Enabled. MB-POST's analyticalCondition carries such a field, and an SDRF may.
     """
     text = metadata_scalar(value).strip()
-    if text.casefold() in _DECLARED_OFF:
+    if text.casefold() in _DECLARED_OFF or ion_mobility_negated(text):
         return "Disabled"
     if text.casefold() in _DECLARED_ON or _ION_MOBILITY_TECHNIQUE.search(text):
         return "Enabled"

@@ -60,8 +60,11 @@ and the unit requires review.
 A unit is ion mobility only on its own evidence (decided 2026-10-03): an
 instrument field naming a mobility instrument (timsTOF, Synapt, Vion, Agilent
 6560, Cyclic IMS, HDMS), a field about ion mobility that says it was on or off,
-or a container that holds mobility data. Study-level text -- a title, abstract,
-description or protocol shared by every unit of the study -- is never evidence.
+or a container that holds mobility data. A field that says mobility was not
+used names the technique too, and is read as off: "No ion mobility", "TIMS
+off", "Ion mobility not used", "DDA without ion mobility". Study-level text --
+a title, abstract, description or protocol shared by every unit of the study --
+is never evidence.
 MetaboBank MTBKS217 (a Waters Xevo G2 QTOF unit) was stored `Enabled` only
 because the lipidome-atlas abstract it shares with its sibling accessions
 mentions ion mobility.

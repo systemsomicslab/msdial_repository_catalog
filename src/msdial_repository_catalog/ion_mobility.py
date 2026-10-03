@@ -14,9 +14,12 @@ check and split exclude the mobility files.
 WHAT IT READS. Only what the Catalog's view of the unit holds (Catalog.get_unit):
 
 - row_instrument: the unit's instrument column, or an instrument field of one of its sample rows,
-  naming a mobility instrument (adapters.common.ION_MOBILITY_INSTRUMENT);
+  naming a mobility instrument (adapters.common.ION_MOBILITY_INSTRUMENT), unless the same field says
+  mobility was off ("timsTOF Pro, TIMS off");
 - assay_parameter: a row field about ion mobility that says it was on or off, or an acquisition field
-  that names a mobility acquisition (PASEF, HDMSE);
+  that names a mobility acquisition (PASEF, HDMSE) or says there was none ("DDA without ion
+  mobility"). A statement that mobility was not used names the technique too, so it is read first
+  (adapters.common.ion_mobility_negated): "No ion mobility" or "TIMS off" is off, never on;
 - container_format: an analysis input whose container holds mobility data -- a Bruker TDF folder, a
   Waters folder with _FUNCnnn.CDT drift files, an Agilent folder with AcqData/IMSFrame.bin, the same
   readings Interactive makes on disk -- or one that cannot, a Bruker BAF or TSF folder;
@@ -55,6 +58,7 @@ from .adapters.common import (
     ION_MOBILITY_STUDY_TEXT_CODE,
     ION_MOBILITY_STUDY_TEXT_WARNING,
     declared_ion_mobility,
+    ion_mobility_negated,
     metadata_scalar,
     study_mentions_ion_mobility,
 )
@@ -98,7 +102,7 @@ def ion_mobility_evidence(unit: Mapping[str, Any]) -> dict[str, Any]:
     """
     rows = [_row_attributes(row) for row in unit.get("samples") or []]
     unit_instrument = metadata_scalar(unit.get("instrument"))
-    unit_instrument_im = bool(ION_MOBILITY_INSTRUMENT.search(unit_instrument))
+    unit_instrument_im = _names_ion_mobility_instrument(unit_instrument)
 
     instruments: Counter[str] = Counter()
     if unit_instrument:
@@ -166,7 +170,7 @@ def ion_mobility_evidence(unit: Mapping[str, Any]) -> dict[str, Any]:
         "stored_ion_mobility": stored,
         "instruments": sorted(instruments),
         "ion_mobility_instruments": sorted(
-            name for name in instruments if ION_MOBILITY_INSTRUMENT.search(name)
+            name for name in instruments if _names_ion_mobility_instrument(name)
         ),
         "container_formats": dict(sorted(containers["formats"].items())),
         "ion_mobility_container_count": containers["ion_mobility"],
@@ -201,11 +205,19 @@ def _read_row(attributes: Mapping[str, str]) -> dict[str, Any]:
             on = on or declared == "Enabled"
             off = off or declared == "Disabled"
         elif any(token in field for token in _ACQUISITION_FIELDS):
-            on = on or bool(_MOBILITY_ACQUISITION.search(text))
+            # "DDA without ion mobility" names the technique and says it was off.
+            negated = ion_mobility_negated(text)
+            off = off or negated
+            on = on or (not negated and bool(_MOBILITY_ACQUISITION.search(text)))
         elif "instrument" in field:
             instruments.append(text)
-            named = named or bool(ION_MOBILITY_INSTRUMENT.search(text))
+            named = named or _names_ion_mobility_instrument(text)
     return {"on": on and not off, "off": off and not on, "named": named, "instruments": instruments}
+
+
+def _names_ion_mobility_instrument(text: str) -> bool:
+    """An instrument field naming a mobility instrument, unless it says mobility was off."""
+    return bool(ION_MOBILITY_INSTRUMENT.search(text)) and not ion_mobility_negated(text)
 
 
 def _container_reading(unit: Mapping[str, Any]) -> dict[str, Any]:
