@@ -296,10 +296,34 @@ def infer_omics(*values: Any) -> str:
     return "Unknown"
 
 
+# A NIST STANDARD REFERENCE MATERIAL IS NOT SELECTED REACTION MONITORING (2026-10-28).
+#
+# MB-POST MPST000004, "Annotation of various metabolites in SRM 1950 human serum", is HILIC/AEX
+# DDA on a Q Exactive HF, and it was stored untargeted = 0 because "srm" matched in its title, so
+# the campaign pools excluded it. SRM 1950 (plasma), SRM 1957 and SRM 1958 (serum) and SRM 2378 are
+# reference materials that untargeted studies run as QC. "SRM" followed by a catalogue number --
+# "NIST SRM 1950", "SRM1950", "SRM-1957", "NIST-SRM-1950", "SRM 1849a" -- is read as the material
+# and removed before the targeted words are looked for. "SRM transitions", "SRM mode" and
+# "scheduled SRM" still count, and so does "SRM 100 ms", where the number is a dwell time ("SRM
+# 1950 MS/MS spectra" is still the material).
+#
+# The other targeted words: "targeted" does not count inside "non-targeted", which is untargeted,
+# and "sim" does not count as an identifier such as the mouse line "SIM-006" (Workbench ST001926).
+#
+# infer_acquisition reads the same "srm" and is deliberately left alone here: acquisition_mode is
+# part of the technical signature, so changing it would re-key every unit it corrects at the next
+# crawl and delete that unit's Class proposals and run records. untargeted is not in the signature.
+_REFERENCE_MATERIAL = re.compile(
+    r"\b(?:nist[\s-]*)?srm\s*®?\s*-?\s*\d{3,4}[a-z]?\b"
+    r"(?!\s*(?:(?:ms|msec)(?![\w/-])|transitions?\b|channels?\b))"
+)
+_TARGETED = re.compile(r"(?<!non-)(?<!non )\b(targeted|mrm|srm|sim(?!-\d)|quantitative panel)\b")
+
+
 def infer_untargeted(*values: Any) -> bool | None:
     text = normalized_text(*values)
     untargeted = bool(re.search(r"\b(untargeted|non[- ]?targeted|global metabol|global lipid)\b", text))
-    targeted = bool(re.search(r"\b(targeted|mrm|srm|sim|quantitative panel)\b", text))
+    targeted = bool(_TARGETED.search(_REFERENCE_MATERIAL.sub(" ", text)))
     if untargeted and targeted:
         return None
     if untargeted:
