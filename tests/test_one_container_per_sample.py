@@ -112,6 +112,22 @@ class NoOpinionTests(unittest.TestCase):
         self.assertEqual("raw", roles["raw/sample.wiff"])
         self.assertEqual("sidecar", roles["raw/sample.wiff.scan"])
 
+    def test_a_sciex_index_names_no_sample(self) -> None:
+        """MB-POST MPST000187 (Stage 2, 2026-11-04): the sample table lists x.wiff.1.~idx2, the index SCIEX
+        software caches beside x.wiff, as a sample of its own. It was declared an analysis input, and the unit
+        was refused at its download. It is auxiliary: no input, and the row naming it names no sample."""
+        unit = normalize_analysis_unit({
+            "files": [{"path": path, "role": "raw"} for path in (
+                "a.wiff", "a.wiff.scan", "x.wiff", "x.wiff.scan", "x.wiff.1.~idx2")],
+            "samples": [{"sample_id": "a", "raw_file": "a.wiff"}, {"sample_id": "x", "raw_file": "x.wiff"},
+                        {"sample_id": "x.wiff.1", "raw_file": "x.wiff.1.~idx2"}],
+        })
+
+        self.assertEqual(["a.wiff", "x.wiff"], [item["path"] for item in unit["analysis_inputs"]])
+        self.assertEqual(["a", "x"], [item["sample_id"] for item in unit["samples"]])
+        self.assertEqual("auxiliary", {item["path"]: item["role"] for item in unit["files"]}["x.wiff.1.~idx2"])
+        self.assertEqual([], [item for item in unit["analysis_input_issues"] if item.get("blocking")])
+
 
 class SuffixTableTests(unittest.TestCase):
     def test_the_two_families_do_not_overlap(self) -> None:

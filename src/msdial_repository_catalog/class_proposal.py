@@ -294,8 +294,14 @@ PACKED_ARCHIVE_SUFFIXES: tuple[str, ...] = (
 # .wiff2.scan is a sidecar as Interactive's _is_sidecar_name reads it. Packed, they are the same
 # files: x.wiff.scan.zip was an input of its own, flagged for conversion, and Interactive excluded
 # the whole SCIEX unit for it.
+#
+# A .~idx2 is the index SCIEX software caches beside a .wiff (x.wiff.1.~idx2). It holds no spectra and
+# no sample. MB-POST MPST000187's sample table lists one as a sample of its own, and the unit was
+# refused at its download because that "input" was not an MS-DIAL input it could find (Stage 2,
+# 2026-11-04). It is auxiliary: a row naming it names no sample, as a row naming a .wiff.scan does not.
 SIDECAR_SUFFIXES: tuple[str, ...] = (".wiff2.scan", ".wiff.scan")
-AUXILIARY_SUFFIXES: tuple[str, ...] = (".timeseries.data",)
+AUXILIARY_SUFFIXES: tuple[str, ...] = (".timeseries.data", ".~idx2")
+_SCIEX_INDEX = re.compile(r"\.wiff2?(?:\.\d+)?\.~idx2$")
 
 ANALYSIS_INPUT_MODEL = "one-input-per-sample.v1"
 
@@ -1202,6 +1208,10 @@ def _primary_stem(path: str) -> str:
     """The name a SCIEX file shares with the files that travel with it, packed or not."""
     value = path.replace("\\", "/").casefold()
     value = unpacked_name(value) or value
+    # A SCIEX index, x.wiff.1.~idx2, is x.wiff's: its stem is x.
+    index = _SCIEX_INDEX.search(value)
+    if index:
+        return value[: index.start()]
     for suffix in (*AUXILIARY_SUFFIXES, *SIDECAR_SUFFIXES, ".wiff2", ".wiff"):
         if value.endswith(suffix):
             return value[: -len(suffix)]
