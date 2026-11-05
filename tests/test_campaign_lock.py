@@ -405,5 +405,37 @@ class WithoutPsutilWindowsIsReadThroughOpenProcess(unittest.TestCase):
         self.assertFalse(dead)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "proc_pidinfo is the macOS probe")
+class WithoutPsutilMacOSIsReadThroughLibproc(unittest.TestCase):
+    def test_proc_pidinfo_tells_a_live_process_from_an_exited_one(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            with mock.patch.object(campaign_lock, "_psutil_probe", return_value=(None, None)), NO_OS_KILL:
+                alive, created = campaign_lock._process_probe(os.getpid())
+                other, other_created = campaign_lock._process_probe(child.pid)
+                dead, _ = campaign_lock._process_probe(exited_pid())
+        finally:
+            child.kill()
+            child.wait()
+
+        self.assertTrue(alive)
+        self.assertIsNotNone(created)
+        self.assertTrue(other)
+        self.assertGreaterEqual(other_created, created, "the child started after this process")
+        self.assertFalse(dead)
+
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid reaches macOS in Python 3.13")
+    def test_an_exited_child_not_yet_reaped_is_dead(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)  # exited, left unreaped
+        try:
+            with mock.patch.object(campaign_lock, "_psutil_probe", return_value=(None, None)), NO_OS_KILL:
+                zombie, _ = campaign_lock._process_probe(child.pid)
+        finally:
+            child.wait()
+
+        self.assertFalse(zombie)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
