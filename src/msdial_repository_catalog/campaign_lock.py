@@ -30,17 +30,21 @@ its own judgement.
 
 WHY LIVENESS IS NOT os.kill. On Windows os.kill(pid, 0) is not a probe: signal 0 is CTRL_C_EVENT, and any
 other value terminates the process. The owner is read through psutil or OpenProcess, with its creation
-time, because Windows reuses process ids. These are the semantics of Interactive's process_liveness.py,
+time, because Windows reuses process ids. macOS has no /proc, so without psutil the owner is read through
+libproc's proc_pidinfo, which is where psutil reads it there, again with its start time. These are the semantics of Interactive's process_liveness.py,
 which the download store and the campaign runner use; the Catalog does not depend on Interactive, so it
 carries the same probe rather than importing it.
 """
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
 import socket
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -303,6 +307,8 @@ def _process_probe(pid: int) -> tuple[bool | None, float | None]:
         return alive, created
     if os.name == "nt":
         return _windows_probe(pid)
+    if sys.platform == "darwin":
+        return _macos_probe(pid)
     if Path("/proc/self").exists():
         return Path(f"/proc/{pid}").exists(), None
     return None, None
@@ -324,6 +330,64 @@ def _psutil_probe(pid: int) -> tuple[bool | None, float | None]:
         return True, None
     except psutil.Error:
         return None, None
+
+
+class _ProcBsdInfo(ctypes.Structure):
+    """struct proc_bsdinfo from <sys/proc_info.h>: 136 bytes, the PROC_PIDTBSDINFO flavor."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _macos_probe(pid: int) -> tuple[bool | None, float | None]:
+    """Read the process through libproc, as psutil does on macOS: no /proc there, and no signal sent.
+
+    proc_pidinfo(PROC_PIDTBSDINFO) fails with ESRCH for a process that does not exist and EPERM for
+    one that exists and is not ours to read. The start time it reports is the one psutil's
+    create_time returns, so a lock written with either probe compares with the other.
+    """
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        proc_pidinfo = libc.proc_pidinfo
+    except (OSError, AttributeError):
+        return None, None
+    proc_pidinfo.restype = ctypes.c_int
+    proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+    info = _ProcBsdInfo()
+    size = ctypes.sizeof(info)
+    read = proc_pidinfo(pid, 3, 0, ctypes.byref(info), size)  # PROC_PIDTBSDINFO
+    if read <= 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            return False, None
+        return (True if error == errno.EPERM else None), None
+    if read < size:
+        return None, None
+    if info.pbi_status == 5:  # SZOMB: exited, not yet reaped
+        return False, None
+    return True, info.pbi_start_tvsec + info.pbi_start_tvusec / 1_000_000
 
 
 def _windows_probe(pid: int) -> tuple[bool | None, float | None]:
